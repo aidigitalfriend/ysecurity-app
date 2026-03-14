@@ -355,8 +355,6 @@ app.post('/api/devices/register', [
     res.status(500).json({ success: false, error: 'Failed to register device' });
   }
 });
-  });
-});
 
 // Location ping with validation and authentication
 app.post('/api/devices/:deviceId/ping', [
@@ -576,8 +574,6 @@ app.post('/api/admin/devices/:deviceId/command', [
     res.status(500).json({ success: false, error: 'Failed to send command' });
   }
 });
-  });
-});
 // Payment to reveal location
 app.post('/api/payments/create-session', [
   authenticateToken,
@@ -644,7 +640,6 @@ app.get('/api/devices/:deviceId/location', [
     logger.error('Database error:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch location' });
   }
-});
 });
 
 // Get device status
