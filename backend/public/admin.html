@@ -6,6 +6,7 @@
     <title>Sercret Security Admin</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
     <style>
         body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
         #map { height: 400px; }
@@ -15,6 +16,7 @@
 </head>
 <body>
     <h1>Sercret Security Admin</h1>
+    <div id="connection-status" style="padding: 10px; margin: 10px 0; border-radius: 5px; background: #e3f2fd;">🔄 Connecting...</div>
     <div id="devices"></div>
     <div id="map"></div>
 
@@ -22,8 +24,41 @@
         const API_BASE = 'http://localhost:3000/api';
         let map;
         let markers = {};
+        let socket;
+        let authToken = localStorage.getItem('authToken');
 
-        // Initialize map
+        // Initialize Socket.IO
+        function initSocket() {
+            socket = io('http://localhost:3000');
+
+            socket.on('authenticated', (data) => {
+                if (data.success) {
+                    console.log('Socket authenticated');
+                    document.getElementById('connection-status').textContent = '🟢 Connected (Real-time)';
+                } else {
+                    console.error('Socket authentication failed');
+                }
+            });
+
+            socket.on('location-update', (data) => {
+                updateDeviceLocation(data);
+            });
+
+            socket.on('command-sent', (data) => {
+                console.log('Command sent:', data);
+                alert('Command sent successfully');
+            });
+
+            socket.on('command-error', (error) => {
+                console.error('Command error:', error);
+                alert('Failed to send command: ' + error.error);
+            });
+
+            // Authenticate socket if we have a token
+            if (authToken) {
+                socket.emit('authenticate', authToken);
+            }
+        }
         function initMap() {
             map = L.map('map').setView([0, 0], 2);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -56,21 +91,32 @@
             }
         }
 
-        // View locations
+        // View locations and subscribe to real-time updates
         async function viewLocations(deviceId) {
             try {
                 const response = await fetch(`${API_BASE}/admin/devices/${deviceId}/locations`);
                 const locations = await response.json();
-                // Clear previous markers
-                Object.values(markers).forEach(marker => map.removeLayer(marker));
-                markers = {};
-                locations.forEach(loc => {
-                    const marker = L.marker([loc.latitude, loc.longitude]).addTo(map);
-                    marker.bindPopup(`Time: ${loc.timestamp}<br>Battery: ${loc.battery}%`);
-                    markers[loc.id] = marker;
-                });
-                if (locations.length > 0) {
-                    map.setView([locations[0].latitude, locations[0].longitude], 13);
+
+                if (locations.success) {
+                    // Clear previous markers
+                    Object.values(markers).forEach(marker => map.removeLayer(marker));
+                    markers = {};
+
+                    // Add historical locations
+                    locations.locations.forEach(loc => {
+                        const marker = L.marker([loc.latitude, loc.longitude]).addTo(map);
+                        marker.bindPopup(`Time: ${loc.timestamp}<br>Battery: ${loc.battery}%`);
+                        markers[loc.id] = marker;
+                    });
+
+                    if (locations.locations.length > 0) {
+                        map.setView([locations.locations[0].latitude, locations.locations[0].longitude], 13);
+                    }
+
+                    // Subscribe to real-time updates for this device
+                    if (socket) {
+                        socket.emit('subscribe-locations', deviceId);
+                    }
                 }
             } catch (error) {
                 console.error('Failed to load locations:', error);
@@ -87,17 +133,47 @@
             }
         }
 
-        // Send command
+        // Update device location in real-time
+        function updateDeviceLocation(data) {
+            const { deviceId, lat, lng, accuracy, battery, timestamp } = data;
+
+            // Update or create marker
+            if (markers[deviceId]) {
+                markers[deviceId].setLatLng([lat, lng]);
+                markers[deviceId].setPopupContent(`
+                    <strong>Device: ${deviceId}</strong><br>
+                    Time: ${new Date(timestamp).toLocaleString()}<br>
+                    Battery: ${battery}%<br>
+                    Accuracy: ${accuracy}m<br>
+                    <em>Real-time update</em>
+                `);
+            } else {
+                const marker = L.marker([lat, lng]).addTo(map);
+                marker.bindPopup(`
+                    <strong>Device: ${deviceId}</strong><br>
+                    Time: ${new Date(timestamp).toLocaleString()}<br>
+                    Battery: ${battery}%<br>
+                    Accuracy: ${accuracy}m<br>
+                    <em>Real-time update</em>
+                `);
+                markers[deviceId] = marker;
+            }
+
+            // Center map on update if this device is selected
+            if (map.getBounds().contains([lat, lng])) {
+                map.panTo([lat, lng]);
+            }
+        }
+
+        // Send command via Socket.IO
         async function sendCommand(deviceId, command) {
-            try {
-                await fetch(`${API_BASE}/admin/devices/${deviceId}/command`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ command })
-                });
-                alert(`Command ${command} sent to ${deviceId}`);
-            } catch (error) {
-                console.error('Failed to send command:', error);
+            if (!socket) {
+                alert('Real-time connection not available');
+                return;
+            }
+
+            socket.emit('send-command', { deviceId, command });
+        }
             }
         }
 
@@ -125,6 +201,7 @@
 
         // Init
         initMap();
+        initSocket();
         loadDevices();
     </script>
 </body>

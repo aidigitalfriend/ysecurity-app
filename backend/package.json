@@ -9,13 +9,23 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "sqlite3": "^5.1.6",
+    "pg": "^8.11.3",
     "stripe": "^13.0.0",
     "nodemailer": "^6.9.7",
     "cors": "^2.8.5",
     "body-parser": "^1.20.2",
     "jsonwebtoken": "^9.0.2",
-    "bcryptjs": "^2.4.3"
+    "bcryptjs": "^2.4.3",
+    "express-rate-limit": "^7.1.5",
+    "helmet": "^7.1.0",
+    "morgan": "^1.10.0",
+    "dotenv": "^16.3.1",
+    "express-validator": "^7.0.1",
+    "joi": "^17.11.0",
+    "socket.io": "^4.7.4",
+    "redis": "^4.6.10",
+    "winston": "^3.11.0",
+    "compression": "^1.7.4"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
