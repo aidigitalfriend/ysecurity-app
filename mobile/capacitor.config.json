@@ -1,0 +1,6 @@
+{
+  "appId": "com.sercret.security",
+  "appName": "Sercret Security",
+  "webDir": "build",
+  "bundledWebRuntime": false
+}

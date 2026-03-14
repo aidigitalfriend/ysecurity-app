@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sercret Security Admin</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+        #map { height: 400px; }
+        .device { margin: 10px 0; padding: 10px; border: 1px solid #ccc; }
+        button { margin: 5px; padding: 5px 10px; }
+    </style>
+</head>
+<body>
+    <h1>Sercret Security Admin</h1>
+    <div id="devices"></div>
+    <div id="map"></div>
+
+    <script>
+        const API_BASE = 'http://localhost:3000/api';
+        let map;
+        let markers = {};
+
+        // Initialize map
+        function initMap() {
+            map = L.map('map').setView([0, 0], 2);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors'
+            }).addTo(map);
+        }
+
+        // Load devices
+        async function loadDevices() {
+            try {
+                const response = await fetch(`${API_BASE}/admin/devices`);
+                const devices = await response.json();
+                const container = document.getElementById('devices');
+                container.innerHTML = '';
+                devices.forEach(device => {
+                    const div = document.createElement('div');
+                    div.className = 'device';
+                    div.innerHTML = `
+                        <strong>${device.id}</strong> - ${device.model} (${device.status})
+                        <button onclick="viewLocations('${device.id}')">View Locations</button>
+                        <button onclick="markLost('${device.id}')">Mark as Lost</button>
+                        <button onclick="sendCommand('${device.id}', 'alarm')">Trigger Alarm</button>
+                        <button onclick="sendCommand('${device.id}', 'camera')">Take Photo</button>
+                        <button onclick="sendGeofence('${device.id}')">Set Geofence</button>
+                    `;
+                    container.appendChild(div);
+                });
+            } catch (error) {
+                console.error('Failed to load devices:', error);
+            }
+        }
+
+        // View locations
+        async function viewLocations(deviceId) {
+            try {
+                const response = await fetch(`${API_BASE}/admin/devices/${deviceId}/locations`);
+                const locations = await response.json();
+                // Clear previous markers
+                Object.values(markers).forEach(marker => map.removeLayer(marker));
+                markers = {};
+                locations.forEach(loc => {
+                    const marker = L.marker([loc.latitude, loc.longitude]).addTo(map);
+                    marker.bindPopup(`Time: ${loc.timestamp}<br>Battery: ${loc.battery}%`);
+                    markers[loc.id] = marker;
+                });
+                if (locations.length > 0) {
+                    map.setView([locations[0].latitude, locations[0].longitude], 13);
+                }
+            } catch (error) {
+                console.error('Failed to load locations:', error);
+            }
+        }
+
+        // Mark as lost
+        async function markLost(deviceId) {
+            try {
+                await fetch(`${API_BASE}/admin/devices/${deviceId}/mark-lost`, { method: 'POST' });
+                loadDevices();
+            } catch (error) {
+                console.error('Failed to mark as lost:', error);
+            }
+        }
+
+        // Send command
+        async function sendCommand(deviceId, command) {
+            try {
+                await fetch(`${API_BASE}/admin/devices/${deviceId}/command`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command })
+                });
+                alert(`Command ${command} sent to ${deviceId}`);
+            } catch (error) {
+                console.error('Failed to send command:', error);
+            }
+        }
+
+        // Send geofence
+        async function sendGeofence(deviceId) {
+            const lat = prompt('Enter latitude:');
+            const lng = prompt('Enter longitude:');
+            const radius = prompt('Enter radius (meters):');
+            if (lat && lng && radius) {
+                try {
+                    await fetch(`${API_BASE}/admin/devices/${deviceId}/command`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            command: 'geofence',
+                            params: { lat: parseFloat(lat), lng: parseFloat(lng), radius: parseFloat(radius) }
+                        })
+                    });
+                    alert('Geofence set');
+                } catch (error) {
+                    console.error('Failed to set geofence:', error);
+                }
+            }
+        }
+
+        // Init
+        initMap();
+        loadDevices();
+    </script>
+</body>
+</html>
