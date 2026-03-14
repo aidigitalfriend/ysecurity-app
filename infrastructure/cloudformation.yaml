@@ -1,0 +1,283 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Sercret Security Infrastructure - EC2 + RDS PostgreSQL'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: 'sercret-security-prod'
+    Description: 'Environment name for tagging'
+
+  InstanceType:
+    Type: String
+    Default: 't3.micro'
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+    Description: 'EC2 instance type'
+
+  KeyName:
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    Description: 'Name of an existing EC2 KeyPair'
+
+  DBInstanceClass:
+    Type: String
+    Default: 'db.t3.micro'
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+      - db.t3.medium
+    Description: 'RDS instance class'
+
+  DBName:
+    Type: String
+    Default: 'sercret_security'
+    Description: 'Database name'
+
+  DBUsername:
+    Type: String
+    Default: 'sercret_admin'
+    Description: 'Database admin username'
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: 'Database admin password'
+    MinLength: 8
+
+  VpcCidrBlock:
+    Type: String
+    Default: '10.0.0.0/16'
+    Description: 'CIDR block for VPC'
+
+  PublicSubnetCidrBlock:
+    Type: String
+    Default: '10.0.1.0/24'
+    Description: 'CIDR block for public subnet'
+
+  PrivateSubnetCidrBlock:
+    Type: String
+    Default: '10.0.2.0/24'
+    Description: 'CIDR block for private subnet'
+
+Resources:
+  # VPC and Networking
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidrBlock
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-vpc'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-igw'
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCidrBlock
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-subnet'
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetCidrBlock
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-subnet'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Security Groups
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for EC2 instance'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: '0.0.0.0/0'  # Restrict to your IP in production
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: '0.0.0.0/0'
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: '0.0.0.0/0'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-ec2-sg'
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for RDS instance'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref EC2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-rds-sg'
+
+  # RDS PostgreSQL Database
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: 'Subnet group for RDS'
+      SubnetIds:
+        - !Ref PrivateSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-db-subnet-group'
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: !Ref DBInstanceClass
+      DBName: !Ref DBName
+      Engine: postgres
+      EngineVersion: '15.4'
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      AllocatedStorage: '20'
+      StorageType: gp2
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      BackupRetentionPeriod: 7
+      MultiAZ: false
+      PubliclyAccessible: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-db'
+
+  # EC2 Instance
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      ImageId: ami-0abcdef1234567890  # Amazon Linux 2 - update with latest AMI
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      SubnetId: !Ref PublicSubnet
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y git nodejs npm postgresql postgresql-devel
+
+          # Install PM2 for process management
+          npm install -g pm2
+
+          # Clone repository
+          cd /home/ec2-user
+          git clone https://github.com/chicksbird/sercret-security.git
+          cd sercret-security/backend
+
+          # Install dependencies
+          npm install
+
+          # Create environment file
+          cat > .env << EOF
+          NODE_ENV=production
+          PORT=3000
+          JWT_SECRET=${JWT_SECRET}
+          STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+          STRIPE_PUBLISHABLE_KEY=${STRIPE_PUBLISHABLE_KEY}
+          EMAIL_USER=${EMAIL_USER}
+          EMAIL_PASS=${EMAIL_PASS}
+          DATABASE_URL=postgresql://${DBUsername}:${DBPassword}@${DBInstance.Endpoint.Address}:${DBInstance.Endpoint.Port}/${DBName}
+          API_BASE_URL=https://your-domain.com/api
+          CORS_ORIGIN=https://your-domain.com
+          SESSION_SECRET=${SESSION_SECRET}
+          RATE_LIMIT_WINDOW=15
+          RATE_LIMIT_MAX=100
+          EOF
+
+          # Start application with PM2
+          pm2 start server.js --name sercret-security
+          pm2 startup
+          pm2 save
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-ec2'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # Elastic IP for EC2
+  EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref EC2Instance
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-eip'
+
+Outputs:
+  EC2PublicIP:
+    Description: 'Public IP of EC2 instance'
+    Value: !GetAtt EC2Instance.PublicIp
+    Export:
+      Name: !Sub '${EnvironmentName}-ec2-public-ip'
+
+  DBEndpoint:
+    Description: 'RDS PostgreSQL endpoint'
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: !Sub '${EnvironmentName}-db-endpoint'
+
+  DBPort:
+    Description: 'RDS PostgreSQL port'
+    Value: !GetAtt DBInstance.Endpoint.Port
+    Export:
+      Name: !Sub '${EnvironmentName}-db-port'
