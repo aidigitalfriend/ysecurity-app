@@ -86,6 +86,95 @@ app.use(cors({
   origin: process.env.CORS_ORIGIN || (process.env.NODE_ENV === 'production' ? 'https://ysecurity.app' : 'http://localhost:3000'),
   credentials: true
 }));
+// Stripe webhook needs raw body for signature verification - must be before bodyParser.json
+app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!webhookSecret || webhookSecret === 'whsec_replace_after_creating_webhook') {
+    logger.error('Stripe webhook secret not configured');
+    return res.status(500).send('Webhook secret not configured');
+  }
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+  } catch (err) {
+    logger.error(`Webhook signature verification failed: ${err.message}`);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed': {
+        const session = event.data.object;
+        logger.info(`Checkout completed: ${session.id}`);
+
+        // Update member payment status
+        const result = await pool.query(
+          'SELECT member_id, email, password_plain, payment_status FROM members WHERE stripe_session_id = $1',
+          [session.id]
+        );
+
+        if (result.rows.length > 0 && result.rows[0].payment_status !== 'completed') {
+          const member = result.rows[0];
+          await pool.query(
+            'UPDATE members SET payment_status = $1, stripe_payment_id = $2 WHERE stripe_session_id = $3',
+            ['completed', session.payment_intent, session.id]
+          );
+
+          // Send credentials email
+          try {
+            const mailOptions = {
+              from: process.env.EMAIL_USER,
+              to: member.email,
+              subject: 'Your Ysecurity Member ID & Password',
+              html: `
+                <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px;">
+                  <h2 style="color:#1a73e8;">🛡️ Welcome to Ysecurity!</h2>
+                  <p>Your membership is now active. Here are your credentials:</p>
+                  <div style="background:#f8f9fa;padding:20px;border-radius:8px;margin:20px 0;">
+                    <p style="margin:0 0 8px;"><strong>Member ID:</strong></p>
+                    <p style="font-size:1.4rem;font-weight:bold;color:#1a73e8;margin:0 0 16px;font-family:monospace;">${member.member_id}</p>
+                    <p style="margin:0 0 8px;"><strong>Password:</strong></p>
+                    <p style="font-size:1.4rem;font-weight:bold;color:#1a73e8;margin:0;font-family:monospace;">${member.password_plain}</p>
+                  </div>
+                  <p style="color:#ea4335;"><strong>⚠️ Important:</strong> Save these credentials securely!</p>
+                  <p style="color:#5f6368;font-size:0.9rem;">Use your Member ID and password to install and activate the Ysecurity app.</p>
+                  <hr style="border:none;border-top:1px solid #e8eaed;margin:24px 0;">
+                  <p style="color:#5f6368;font-size:0.8rem;">Ysecurity - Smart Device Security<br>https://ysecurity.app</p>
+                </div>
+              `
+            };
+            transporter.sendMail(mailOptions);
+          } catch (emailErr) {
+            logger.error('Webhook: Failed to send credentials email:', emailErr);
+          }
+
+          logger.info(`Member ${member.member_id} payment completed via webhook`);
+        }
+        break;
+      }
+
+      case 'payment_intent.succeeded':
+        logger.info(`PaymentIntent succeeded: ${event.data.object.id}`);
+        break;
+
+      case 'payment_intent.payment_failed':
+        logger.warn(`PaymentIntent failed: ${event.data.object.id}`);
+        break;
+
+      default:
+        logger.info(`Unhandled webhook event type: ${event.type}`);
+    }
+
+    res.json({ received: true });
+  } catch (error) {
+    logger.error('Webhook processing error:', error);
+    res.status(500).json({ error: 'Webhook processing failed' });
+  }
+});
+
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(express.static('public'));
 
