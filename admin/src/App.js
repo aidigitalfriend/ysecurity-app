@@ -9,7 +9,8 @@ import {
 import {
   Map as MapIcon, LocationOn, Security, CameraAlt,
   Alarm, GpsFixed, BatteryFull, NetworkCheck, Analytics,
-  Devices, Timeline, Notifications
+  Devices, Timeline, Notifications, People, Delete,
+  PlayArrow, Stop
 } from '@mui/icons-material';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
@@ -17,7 +18,7 @@ import io from 'socket.io-client';
 import { format } from 'date-fns';
 import 'leaflet/dist/leaflet.css';
 
-const API_BASE = 'http://localhost:3000/api';
+const API_BASE = process.env.REACT_APP_API_BASE_URL || 'https://ysecurity.app/api';
 
 function AdminDashboard() {
   const [tabValue, setTabValue] = useState(0);
@@ -36,11 +37,15 @@ function AdminDashboard() {
   const [loginDialog, setLoginDialog] = useState(!authToken);
   const [loginData, setLoginData] = useState({ username: '', password: '' });
   const [alert, setAlert] = useState({ open: false, message: '', severity: 'info' });
+  const [members, setMembers] = useState([]);
+  const [activateDialog, setActivateDialog] = useState({ open: false, memberId: '' });
+  const [confirmDeleteDialog, setConfirmDeleteDialog] = useState({ open: false, memberId: null });
 
   useEffect(() => {
     if (authToken) {
       initSocket();
       loadDevices();
+      loadMembers();
       loadAnalytics();
     }
   }, [authToken]);
@@ -71,7 +76,7 @@ function AdminDashboard() {
   };
 
   const initSocket = () => {
-    const socketConnection = io('http://localhost:3000');
+    const socketConnection = io(API_BASE.replace('/api', ''));
 
     socketConnection.on('authenticated', (data) => {
       setIsConnected(data.success);
@@ -181,6 +186,86 @@ function AdminDashboard() {
     }
   };
 
+  const loadMembers = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/admin/members`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      const data = await response.json();
+      if (data.success) {
+        setMembers(data.members);
+      }
+    } catch (error) {
+      showAlert('Failed to load members', 'error');
+    }
+  };
+
+  const activateDevice = async (memberId) => {
+    try {
+      const response = await fetch(`${API_BASE}/admin/devices/activate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        },
+        body: JSON.stringify({ memberId })
+      });
+      const data = await response.json();
+      if (data.success) {
+        showAlert(`Device activated for ${memberId}`, 'success');
+        loadDevices();
+        loadMembers();
+        setActivateDialog({ open: false, memberId: '' });
+      } else {
+        showAlert(data.error || 'Activation failed', 'error');
+      }
+    } catch (error) {
+      showAlert('Failed to activate device', 'error');
+    }
+  };
+
+  const deactivateDevice = async (deviceId) => {
+    try {
+      const response = await fetch(`${API_BASE}/admin/devices/deactivate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        },
+        body: JSON.stringify({ deviceId })
+      });
+      const data = await response.json();
+      if (data.success) {
+        showAlert('Device deactivated', 'success');
+        loadDevices();
+      } else {
+        showAlert(data.error || 'Deactivation failed', 'error');
+      }
+    } catch (error) {
+      showAlert('Failed to deactivate device', 'error');
+    }
+  };
+
+  const deleteMember = async (memberId) => {
+    try {
+      const response = await fetch(`${API_BASE}/admin/members/${encodeURIComponent(memberId)}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      const data = await response.json();
+      if (data.success) {
+        showAlert(`Member ${memberId} and associated device deleted`, 'success');
+        loadMembers();
+        loadDevices();
+        setConfirmDeleteDialog({ open: false, memberId: null });
+      } else {
+        showAlert(data.error || 'Delete failed', 'error');
+      }
+    } catch (error) {
+      showAlert('Failed to delete member', 'error');
+    }
+  };
+
   const updateDeviceLocation = (data) => {
     setLocations(prev => {
       const newLocations = [data, ...prev.slice(0, 99)]; // Keep last 100 locations
@@ -203,7 +288,7 @@ function AdminDashboard() {
         <Toolbar>
           <Security sx={{ mr: 2 }} />
           <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-            Sercret Security Admin
+            Ysecurity Admin
           </Typography>
           <Chip
             label={isConnected ? '🟢 Real-time' : '🔴 Offline'}
@@ -217,6 +302,7 @@ function AdminDashboard() {
         <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
           <Tabs value={tabValue} onChange={handleTabChange} aria-label="admin tabs">
             <Tab icon={<Devices />} label="Devices" />
+            <Tab icon={<People />} label="Members" />
             <Tab icon={<MapIcon />} label="Tracking" />
             <Tab icon={<Analytics />} label="Analytics" />
             <Tab icon={<Notifications />} label="Reports" />
@@ -229,21 +315,31 @@ function AdminDashboard() {
             onViewLocations={viewLocations}
             onMarkAsLost={markAsLost}
             onSendCommand={sendCommand}
+            onActivate={() => setActivateDialog({ open: true, memberId: '' })}
+            onDeactivate={deactivateDevice}
           />
         </TabPanel>
 
         <TabPanel value={tabValue} index={1}>
+          <MembersTab
+            members={members}
+            onDelete={(memberId) => setConfirmDeleteDialog({ open: true, memberId })}
+            onActivate={(memberId) => activateDevice(memberId)}
+          />
+        </TabPanel>
+
+        <TabPanel value={tabValue} index={2}>
           <TrackingTab
             locations={locations}
             selectedDevice={selectedDevice}
           />
         </TabPanel>
 
-        <TabPanel value={tabValue} index={2}>
+        <TabPanel value={tabValue} index={3}>
           <AnalyticsTab analytics={analytics} />
         </TabPanel>
 
-        <TabPanel value={tabValue} index={3}>
+        <TabPanel value={tabValue} index={4}>
           <ReportsTab />
         </TabPanel>
       </Container>
@@ -271,6 +367,56 @@ function AdminDashboard() {
         </DialogContent>
         <DialogActions>
           <Button onClick={handleLogin}>Login</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Activate Device Dialog */}
+      <Dialog open={activateDialog.open} onClose={() => setActivateDialog({ open: false, memberId: '' })}>
+        <DialogTitle>Activate Device</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            Enter the Member ID to activate their registered device for tracking.
+          </Typography>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Member ID (e.g., YS-123456)"
+            fullWidth
+            value={activateDialog.memberId}
+            onChange={(e) => setActivateDialog({...activateDialog, memberId: e.target.value.toUpperCase()})}
+            inputProps={{ maxLength: 9 }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setActivateDialog({ open: false, memberId: '' })}>Cancel</Button>
+          <Button
+            onClick={() => activateDevice(activateDialog.memberId)}
+            variant="contained"
+            color="success"
+          >
+            Activate
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Confirm Delete Dialog */}
+      <Dialog open={confirmDeleteDialog.open} onClose={() => setConfirmDeleteDialog({ open: false, memberId: null })}>
+        <DialogTitle>Delete Member</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            Are you sure you want to delete member <strong>{confirmDeleteDialog.memberId}</strong> and their associated device?
+            This action cannot be undone. The member will need to repurchase a new membership.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmDeleteDialog({ open: false, memberId: null })}>Cancel</Button>
+          <Button
+            onClick={() => deleteMember(confirmDeleteDialog.memberId)}
+            variant="contained"
+            color="error"
+          >
+            Delete
+          </Button>
         </DialogActions>
       </Dialog>
 
@@ -314,10 +460,11 @@ function TabPanel(props) {
 }
 
 // Devices Tab Component
-function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand }) {
+function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand, onActivate, onDeactivate }) {
   const getStatusColor = (status) => {
     switch (status) {
       case 'active': return 'error';
+      case 'dormant': return 'default';
       case 'verified': return 'warning';
       case 'reported': return 'info';
       default: return 'default';
@@ -327,9 +474,17 @@ function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand }) {
   return (
     <Card>
       <CardContent>
-        <Typography variant="h6" gutterBottom>
-          Device Registry
-        </Typography>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+          <Typography variant="h6">Device Registry</Typography>
+          <Button
+            variant="contained"
+            color="success"
+            startIcon={<PlayArrow />}
+            onClick={onActivate}
+          >
+            Activate Device
+          </Button>
+        </Box>
         <TableContainer component={Paper} sx={{ maxHeight: 600 }}>
           <Table stickyHeader>
             <TableHead>
@@ -337,6 +492,7 @@ function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand }) {
                 <TableCell>Device ID</TableCell>
                 <TableCell>Model</TableCell>
                 <TableCell>OS</TableCell>
+                <TableCell>Member</TableCell>
                 <TableCell>Status</TableCell>
                 <TableCell>Registered</TableCell>
                 <TableCell>Actions</TableCell>
@@ -348,6 +504,7 @@ function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand }) {
                   <TableCell>{device.id.substring(0, 12)}...</TableCell>
                   <TableCell>{device.model}</TableCell>
                   <TableCell>{device.os}</TableCell>
+                  <TableCell>{device.member_id || '—'}</TableCell>
                   <TableCell>
                     <Chip
                       label={device.status}
@@ -365,19 +522,31 @@ function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand }) {
                     >
                       <MapIcon />
                     </IconButton>
-                    <IconButton
-                      size="small"
-                      onClick={() => onMarkAsLost(device.id)}
-                      color="error"
-                      title="Mark as Lost"
-                    >
-                      <GpsFixed />
-                    </IconButton>
+                    {device.status === 'active' ? (
+                      <IconButton
+                        size="small"
+                        onClick={() => onDeactivate(device.id)}
+                        color="warning"
+                        title="Deactivate"
+                      >
+                        <Stop />
+                      </IconButton>
+                    ) : (
+                      <IconButton
+                        size="small"
+                        onClick={() => onMarkAsLost(device.id)}
+                        color="error"
+                        title="Mark as Lost"
+                      >
+                        <GpsFixed />
+                      </IconButton>
+                    )}
                     <IconButton
                       size="small"
                       onClick={() => onSendCommand(device.id, 'alarm')}
                       color="warning"
                       title="Trigger Alarm"
+                      disabled={device.status !== 'active'}
                     >
                       <Alarm />
                     </IconButton>
@@ -386,8 +555,82 @@ function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand }) {
                       onClick={() => onSendCommand(device.id, 'camera')}
                       color="info"
                       title="Take Photo"
+                      disabled={device.status !== 'active'}
                     >
                       <CameraAlt />
+                    </IconButton>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Members Tab Component
+function MembersTab({ members, onDelete, onActivate }) {
+  return (
+    <Card>
+      <CardContent>
+        <Typography variant="h6" gutterBottom>Members</Typography>
+        <TableContainer component={Paper} sx={{ maxHeight: 600 }}>
+          <Table stickyHeader>
+            <TableHead>
+              <TableRow>
+                <TableCell>Email</TableCell>
+                <TableCell>Status</TableCell>
+                <TableCell>Device</TableCell>
+                <TableCell>Device Status</TableCell>
+                <TableCell>Joined</TableCell>
+                <TableCell>Actions</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {members.map((member) => (
+                <TableRow key={member.id}>
+                  <TableCell>{member.email}</TableCell>
+                  <TableCell>
+                    <Chip
+                      label={member.status}
+                      color={member.status === 'active' ? 'success' : 'default'}
+                      size="small"
+                    />
+                  </TableCell>
+                  <TableCell>
+                    {member.device_id ? `${member.device_id.substring(0, 12)}...` : 'No device'}
+                  </TableCell>
+                  <TableCell>
+                    {member.device_status ? (
+                      <Chip
+                        label={member.device_status}
+                        color={member.device_status === 'active' ? 'error' : 'default'}
+                        size="small"
+                      />
+                    ) : '—'}
+                  </TableCell>
+                  <TableCell>{format(new Date(member.created_at), 'MMM dd, yyyy')}</TableCell>
+                  <TableCell>
+                    {member.device_id && member.device_status === 'dormant' && (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="success"
+                        onClick={() => onActivate(member.member_id)}
+                        sx={{ mr: 1 }}
+                      >
+                        Activate
+                      </Button>
+                    )}
+                    <IconButton
+                      size="small"
+                      onClick={() => onDelete(member.member_id)}
+                      color="error"
+                      title="Delete Member"
+                    >
+                      <Delete />
                     </IconButton>
                   </TableCell>
                 </TableRow>

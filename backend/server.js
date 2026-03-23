@@ -239,12 +239,18 @@ async function initializeDatabase() {
         model TEXT NOT NULL,
         os TEXT NOT NULL,
         owner TEXT,
+        member_id TEXT,
         status TEXT DEFAULT 'installed' CHECK (status IN ('installed', 'reported', 'verified', 'active', 'recovered')),
         license_key TEXT UNIQUE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    // Add member_id column if not exists (migration)
+    await pool.query(`
+      ALTER TABLE devices ADD COLUMN IF NOT EXISTS member_id TEXT
+    `).catch(() => {});
 
     // Create location_pings table
     await pool.query(`
@@ -444,25 +450,41 @@ app.post('/api/devices/register', [
   body('deviceId').isLength({ min: 10, max: 100 }).withMessage('Device ID must be 10-100 characters'),
   body('model').isLength({ min: 1, max: 100 }).withMessage('Model is required'),
   body('os').isLength({ min: 1, max: 100 }).withMessage('OS is required'),
-  body('licenseKey').isLength({ min: 10, max: 50 }).withMessage('License key must be 10-50 characters'),
+  body('memberId').matches(/^YS-\d{6}$/).withMessage('Valid Member ID required (format: YS-XXXXXX)'),
+  body('password').isLength({ min: 8 }).withMessage('Password required'),
   handleValidationErrors
 ], async (req, res) => {
-  const { deviceId, model, os, licenseKey } = req.body;
+  const { deviceId, model, os, memberId, password } = req.body;
 
   try {
-    // Check if license is valid and not used
-    const existingDevice = await pool.query('SELECT id FROM devices WHERE license_key = $1', [licenseKey]);
+    // Verify member exists and payment is completed
+    const member = await pool.query(
+      'SELECT id, member_id, password_hash, payment_status FROM members WHERE member_id = $1',
+      [memberId]
+    );
+    if (member.rows.length === 0) {
+      return res.status(401).json({ success: false, error: 'Invalid Member ID' });
+    }
+    if (member.rows[0].payment_status !== 'completed') {
+      return res.status(403).json({ success: false, error: 'Membership payment not completed' });
+    }
+    if (!bcrypt.compareSync(password, member.rows[0].password_hash)) {
+      return res.status(401).json({ success: false, error: 'Invalid password' });
+    }
+
+    // Check if this member already has a device registered
+    const existingDevice = await pool.query('SELECT id FROM devices WHERE member_id = $1', [memberId]);
     if (existingDevice.rows.length > 0) {
-      return res.status(400).json({ success: false, error: 'License already used' });
+      return res.status(400).json({ success: false, error: 'This Member ID is already linked to a device. Contact support if you need to reinstall.' });
     }
 
     await pool.query(
-      'INSERT INTO devices (id, model, os, license_key) VALUES ($1, $2, $3, $4)',
-      [deviceId, model, os, licenseKey]
+      'INSERT INTO devices (id, model, os, member_id, license_key) VALUES ($1, $2, $3, $4, $5)',
+      [deviceId, model, os, memberId, memberId]
     );
 
-    logger.info(`Device ${deviceId} registered successfully`);
-    res.json({ success: true, deviceId });
+    logger.info(`Device ${deviceId} registered with member ${memberId}`);
+    res.json({ success: true, deviceId, memberId });
   } catch (error) {
     logger.error('Database error:', error);
     res.status(500).json({ success: false, error: 'Failed to register device' });
@@ -589,7 +611,7 @@ app.get('/api/admin/devices', authenticateToken, async (req, res) => {
 
   try {
     const result = await pool.query(
-      'SELECT id, model, os, owner, status, created_at FROM devices ORDER BY created_at DESC'
+      'SELECT id, model, os, owner, member_id, status, created_at FROM devices ORDER BY created_at DESC'
     );
     res.json({ success: true, devices: result.rows });
   } catch (error) {
@@ -1081,19 +1103,116 @@ app.post('/api/members/login', [
 // Admin Dashboard API Endpoints
 // ========================================
 
-// Get all members (admin)
+// Get all members (admin) - Member ID is NOT exposed for privacy
 app.get('/api/admin/members', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ success: false, error: 'Admin access required' });
   }
   try {
     const result = await pool.query(
-      'SELECT member_id, name, email, payment_status, created_at FROM members ORDER BY created_at DESC'
+      'SELECT m.id, m.name, m.email, m.payment_status, m.created_at, d.id as device_id, d.status as device_status FROM members m LEFT JOIN devices d ON d.member_id = m.member_id ORDER BY m.created_at DESC'
     );
     res.json({ success: true, members: result.rows });
   } catch (error) {
     logger.error('Failed to fetch members:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch members' });
+  }
+});
+
+// Activate device by Member ID (admin) - user must provide their Member ID to admin
+app.post('/api/admin/devices/activate', [
+  authenticateToken,
+  body('memberId').matches(/^YS-\d{6}$/).withMessage('Valid Member ID required (format: YS-XXXXXX)'),
+  handleValidationErrors
+], async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+  const { memberId } = req.body;
+
+  try {
+    // Find device linked to this member ID
+    const device = await pool.query(
+      'SELECT id, status FROM devices WHERE member_id = $1',
+      [memberId]
+    );
+    if (device.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'No device found for this Member ID. The member may not have installed the app yet.' });
+    }
+    if (device.rows[0].status === 'active') {
+      return res.status(400).json({ success: false, error: 'Device is already active' });
+    }
+
+    await pool.query(
+      'UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE member_id = $2',
+      ['active', memberId]
+    );
+
+    logger.info(`Device ${device.rows[0].id} activated by admin ${req.user.username} using member ID ${memberId}`);
+    res.json({ success: true, message: 'Device activated successfully', deviceId: device.rows[0].id });
+  } catch (error) {
+    logger.error('Activation error:', error);
+    res.status(500).json({ success: false, error: 'Failed to activate device' });
+  }
+});
+
+// Deactivate device by Member ID (admin)
+app.post('/api/admin/devices/deactivate', [
+  authenticateToken,
+  body('memberId').matches(/^YS-\d{6}$/).withMessage('Valid Member ID required (format: YS-XXXXXX)'),
+  handleValidationErrors
+], async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+  const { memberId } = req.body;
+
+  try {
+    const result = await pool.query(
+      'UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE member_id = $2',
+      ['installed', memberId]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'No device found for this Member ID' });
+    }
+    logger.info(`Device deactivated by admin ${req.user.username} using member ID ${memberId}`);
+    res.json({ success: true, message: 'Device deactivated' });
+  } catch (error) {
+    logger.error('Deactivation error:', error);
+    res.status(500).json({ success: false, error: 'Failed to deactivate device' });
+  }
+});
+
+// Delete member and their device (admin) - for when user loses their ID
+app.delete('/api/admin/members/:memberId', [
+  authenticateToken,
+  param('memberId').matches(/^YS-\d{6}$/).withMessage('Valid Member ID required'),
+  handleValidationErrors
+], async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+  const { memberId } = req.params;
+
+  try {
+    // Delete device first (cascades to location_pings, commands, etc.)
+    const device = await pool.query('SELECT id FROM devices WHERE member_id = $1', [memberId]);
+    if (device.rows.length > 0) {
+      await pool.query('DELETE FROM devices WHERE member_id = $1', [memberId]);
+      logger.info(`Device ${device.rows[0].id} deleted for member ${memberId}`);
+    }
+
+    // Delete member record
+    const result = await pool.query('DELETE FROM members WHERE member_id = $1', [memberId]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Member not found' });
+    }
+
+    logger.info(`Member ${memberId} and associated device deleted by admin ${req.user.username}`);
+    res.json({ success: true, message: 'Member and device deleted. User can reinstall and create a new membership.' });
+  } catch (error) {
+    logger.error('Delete error:', error);
+    res.status(500).json({ success: false, error: 'Failed to delete member' });
   }
 });
 

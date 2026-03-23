@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { Device } from '@capacitor/device';
 import { BackgroundGeolocation, LocationAccuracy } from '@capacitor/background-geolocation';
@@ -8,185 +8,220 @@ import { Geolocation } from '@capacitor/geolocation';
 import { Storage } from '@capacitor/storage';
 import io from 'socket.io-client';
 
-const API_BASE = process.env.REACT_APP_API_BASE_URL || 'http://localhost:3000/api';
+const API_BASE = process.env.REACT_APP_API_BASE_URL || 'https://ysecurity.app/api';
+
+// App screens
+const SCREEN = {
+  LOADING: 'loading',
+  LOGIN: 'login',
+  INSTALLING: 'installing',
+  INSTALLED: 'installed',
+};
 
 function App() {
+  // Core state
+  const [screen, setScreen] = useState(SCREEN.LOADING);
   const [deviceId, setDeviceId] = useState(null);
+  const [deviceInfo, setDeviceInfo] = useState(null);
+  const [isRegistered, setIsRegistered] = useState(false);
   const [isActive, setIsActive] = useState(false);
+  const [error, setError] = useState(null);
+
+  // Login form
+  const [memberId, setMemberId] = useState('');
+  const [password, setPassword] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  // Tracking state
   const [geofence, setGeofence] = useState(null);
   const [isOnline, setIsOnline] = useState(true);
   const [pendingPings, setPendingPings] = useState([]);
+  const [batteryLevel, setBatteryLevel] = useState(100);
   const [socket, setSocket] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
 
+  const statusIntervalRef = useRef(null);
+  const socketRef = useRef(null);
+
+  // =============================================
+  // INITIALIZATION
+  // =============================================
   useEffect(() => {
     initializeApp();
     setupNetworkListener();
-    initSocket();
     return () => {
-      // Cleanup
-      if (statusCheckInterval) clearInterval(statusCheckInterval);
-      if (socket) socket.disconnect();
+      if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
+      if (socketRef.current) socketRef.current.disconnect();
     };
   }, []);
 
-  const initSocket = () => {
-    const socketConnection = io(API_BASE.replace('/api', ''), {
-      transports: ['websocket', 'polling']
-    });
+  const initializeApp = async () => {
+    try {
+      // Get device info
+      const info = await Device.getInfo();
+      const id = info.uuid || info.identifierForVendor || `web-${Date.now()}`;
+      setDeviceId(id);
+      setDeviceInfo(info);
 
-    socketConnection.on('connect', () => {
-      console.log('Connected to server via Socket.IO');
-      setIsConnected(true);
+      // Check if already registered
+      const cached = await Storage.get({ key: 'registration' });
+      if (cached.value) {
+        const registration = JSON.parse(cached.value);
+        setIsRegistered(true);
+        setMemberId(registration.memberId);
 
-      // Authenticate device
-      if (deviceId) {
-        socketConnection.emit('device-authenticate', { deviceId });
+        // Load cached tracking data
+        await loadCachedData();
+
+        // Start monitoring
+        initSocket(id);
+        startStatusChecks(id);
+        setScreen(SCREEN.INSTALLED);
+      } else {
+        setScreen(SCREEN.LOGIN);
       }
-    });
-
-    socketConnection.on('disconnect', () => {
-      console.log('Disconnected from server');
-      setIsConnected(false);
-    });
-
-    socketConnection.on('device-authenticated', (data) => {
-      if (data.success) {
-        console.log('Device authenticated via socket');
-      }
-    });
-
-    socketConnection.on('command', (command) => {
-      console.log('Received command via socket:', command);
-      executeCommand(command);
-    });
-
-    setSocket(socketConnection);
+    } catch (err) {
+      console.error('Init failed:', err);
+      setError('Failed to initialize app');
+      setScreen(SCREEN.LOGIN);
+    }
   };
-
-  let statusCheckInterval;
 
   const setupNetworkListener = () => {
     Network.addListener('networkStatusChange', (status) => {
       setIsOnline(status.connected);
       if (status.connected) {
-        // Sync pending pings when back online
         syncPendingPings();
       }
     });
   };
 
-  const initializeApp = async () => {
-    try {
-      setError(null);
+  // =============================================
+  // LOGIN & REGISTRATION
+  // =============================================
+  const handleLogin = async () => {
+    setError(null);
 
-      // Get device info
-      const deviceInfo = await Device.getInfo();
-      const id = deviceInfo.uuid || deviceInfo.identifierForVendor;
-      if (!id) {
-        throw new Error('Unable to get device identifier');
-      }
-      setDeviceId(id);
-
-      // Load cached data
-      await loadCachedData();
-
-      // Register device (but dormant)
-      await registerDevice(id, deviceInfo);
-
-      // Check status periodically
-      checkStatus(id);
-      statusCheckInterval = setInterval(() => checkStatus(id), 60000); // Check every minute
-
-    } catch (err) {
-      console.error('Initialization failed:', err);
-      setError(`Initialization failed: ${err.message}`);
+    // Validate Member ID format
+    const memberIdTrimmed = memberId.trim().toUpperCase();
+    if (!/^YS-\d{6}$/.test(memberIdTrimmed)) {
+      setError('Invalid Member ID format. Must be YS-XXXXXX (e.g., YS-123456)');
+      return;
     }
-  };
-
-  const loadCachedData = async () => {
-    try {
-      const cachedPings = await Storage.get({ key: 'pendingPings' });
-      if (cachedPings.value) {
-        setPendingPings(JSON.parse(cachedPings.value));
-      }
-      const cachedGeofence = await Storage.get({ key: 'geofence' });
-      if (cachedGeofence.value) {
-        setGeofence(JSON.parse(cachedGeofence.value));
-      }
-    } catch (err) {
-      console.error('Failed to load cached data:', err);
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters');
+      return;
     }
-  };
 
-  const savePendingPings = async (pings) => {
-    try {
-      await Storage.set({ key: 'pendingPings', value: JSON.stringify(pings) });
-    } catch (err) {
-      console.error('Failed to save pending pings:', err);
-    }
-  };
-
-  const registerDevice = async (id, info) => {
-    if (!isOnline) return; // Skip if offline
+    setIsLoggingIn(true);
 
     try {
+      const info = deviceInfo || await Device.getInfo();
+      const id = deviceId || info.uuid || info.identifierForVendor;
+
       const response = await fetch(`${API_BASE}/devices/register`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Device-ID': id
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           deviceId: id,
-          model: info.model,
-          os: `${info.operatingSystem} ${info.osVersion}`,
-          licenseKey: 'demo-license-key-12345' // In real app, generate or input
+          model: info.model || 'Unknown',
+          os: `${info.operatingSystem || 'Unknown'} ${info.osVersion || ''}`.trim(),
+          memberId: memberIdTrimmed,
+          password: password,
         })
       });
 
+      const data = await response.json();
+
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || `HTTP ${response.status}`);
+        throw new Error(data.error || 'Registration failed');
       }
 
-      const data = await response.json();
-      console.log('Device registered:', data);
-    } catch (error) {
-      console.error('Registration failed:', error);
-      setError(`Registration failed: ${error.message}`);
+      // Save registration locally
+      await Storage.set({
+        key: 'registration',
+        value: JSON.stringify({
+          deviceId: id,
+          memberId: memberIdTrimmed,
+          registeredAt: new Date().toISOString(),
+        })
+      });
+
+      setIsRegistered(true);
+      setScreen(SCREEN.INSTALLING);
+
+      // Brief install animation then go to installed screen
+      setTimeout(() => {
+        initSocket(id);
+        startStatusChecks(id);
+        setScreen(SCREEN.INSTALLED);
+      }, 3000);
+
+    } catch (err) {
+      console.error('Login failed:', err);
+      setError(err.message);
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 
-  const checkStatus = async (id) => {
-    if (!isOnline) return; // Skip if offline
+  // =============================================
+  // SOCKET.IO CONNECTION
+  // =============================================
+  const initSocket = (id) => {
+    const socketConnection = io(API_BASE.replace('/api', ''), {
+      transports: ['websocket', 'polling'],
+    });
 
+    socketConnection.on('connect', () => {
+      setIsConnected(true);
+      socketConnection.emit('device-authenticate', { deviceId: id });
+    });
+
+    socketConnection.on('disconnect', () => {
+      setIsConnected(false);
+    });
+
+    socketConnection.on('command', (command) => {
+      executeCommand(command);
+    });
+
+    socketRef.current = socketConnection;
+    setSocket(socketConnection);
+  };
+
+  // =============================================
+  // STATUS MONITORING
+  // =============================================
+  const startStatusChecks = (id) => {
+    checkStatus(id);
+    statusIntervalRef.current = setInterval(() => checkStatus(id), 60000);
+  };
+
+  const checkStatus = async (id) => {
+    if (!isOnline) return;
     try {
       const response = await fetch(`${API_BASE}/devices/${id}/status`);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      if (!response.ok) return;
 
       const data = await response.json();
       if (data.success && data.status === 'active' && !isActive) {
         setIsActive(true);
-        await startTracking();
+        await startTracking(id);
+      } else if (data.success && data.status !== 'active') {
+        setIsActive(false);
       }
 
-      // Check for commands
       await checkCommands(id);
-    } catch (error) {
-      console.error('Status check failed:', error);
-      // Don't set error for status checks, they're periodic
+    } catch (err) {
+      // Silent fail for periodic checks
     }
   };
 
   const checkCommands = async (id) => {
     try {
       const response = await fetch(`${API_BASE}/devices/${id}/commands`);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      if (!response.ok) return;
 
       const data = await response.json();
       if (data.success && data.commands) {
@@ -194,196 +229,140 @@ function App() {
           await executeCommand(cmd);
         }
       }
-    } catch (error) {
-      console.error('Command check failed:', error);
+    } catch (err) {
+      // Silent fail
     }
   };
 
-  const startTracking = async () => {
+  // =============================================
+  // GPS TRACKING
+  // =============================================
+  const startTracking = async (id) => {
     if (!Capacitor.isNativePlatform()) {
       console.log('Background geolocation not available in web mode');
       return;
     }
 
     try {
-      setError(null);
-
-      // Request permissions
       const permissions = await BackgroundGeolocation.requestPermissions();
-      if (permissions.location !== 'granted') {
-        throw new Error('Location permission denied');
-      }
+      if (permissions.location !== 'granted') return;
 
-      // Configure background tracking with battery optimization
-      const config = {
-        distanceFilter: 50, // meters - increased for battery savings
-        desiredAccuracy: LocationAccuracy.MEDIUM, // Reduced accuracy for battery
+      await BackgroundGeolocation.start({
+        distanceFilter: 50,
+        desiredAccuracy: LocationAccuracy.MEDIUM,
         stationaryRadius: 25,
-        interval: 300000, // 5 minutes when active
-        fastestInterval: 60000, // Minimum 1 minute
+        interval: 300000,
+        fastestInterval: 60000,
         activitiesInterval: 10000,
         stopTimeout: 5,
-        debug: false, // Disable debug mode
+        debug: false,
         notification: {
-          title: 'Device Tracking Active',
-          text: 'Your device location is being monitored',
+          title: 'System Service',
+          text: 'Running',
           smallIcon: 'drawable/ic_launcher',
-          largeIcon: 'drawable/ic_launcher'
+          largeIcon: 'drawable/ic_launcher',
         }
-      };
+      });
 
-      await BackgroundGeolocation.start(config);
-
-      // Listen for location updates
       BackgroundGeolocation.addListener('location', async (location) => {
         try {
           const networkStatus = await Network.getStatus();
-          const data = {
+          const pingData = {
             lat: location.latitude,
             lng: location.longitude,
             accuracy: location.accuracy,
             battery: batteryLevel,
-            networkType: networkStatus.connectionType || 'unknown'
+            networkType: networkStatus.connectionType || 'unknown',
           };
 
-          // Check geofence
           if (geofence) {
-            const distance = getDistance(location.latitude, location.longitude, geofence.lat, geofence.lng);
-            if (distance > geofence.radius) {
-              data.alert = 'geofence_breach';
+            const dist = getDistance(location.latitude, location.longitude, geofence.lat, geofence.lng);
+            if (dist > geofence.radius) {
+              pingData.alert = 'geofence_breach';
             }
           }
 
-          await sendPing(data);
+          await sendPing(pingData);
         } catch (err) {
           console.error('Location processing failed:', err);
         }
       });
 
-      // Listen for network changes (SIM change alert)
-      Network.addListener('networkStatusChange', async (status) => {
-        try {
-          await sendPing({
-            alert: 'network_change',
-            networkType: status.connectionType || 'unknown'
-          });
-        } catch (err) {
-          console.error('Network change ping failed:', err);
-        }
-      });
-
-      console.log('Background tracking started');
-    } catch (error) {
-      console.error('Failed to start tracking:', error);
-      setError(`Tracking failed: ${error.message}`);
+    } catch (err) {
+      console.error('Tracking start failed:', err);
     }
   };
 
+  // =============================================
+  // LOCATION PINGS
+  // =============================================
+  const loadCachedData = async () => {
+    try {
+      const cachedPings = await Storage.get({ key: 'pendingPings' });
+      if (cachedPings.value) setPendingPings(JSON.parse(cachedPings.value));
+      const cachedGeofence = await Storage.get({ key: 'geofence' });
+      if (cachedGeofence.value) setGeofence(JSON.parse(cachedGeofence.value));
+    } catch (err) {
+      console.error('Cache load failed:', err);
+    }
+  };
+
+  const savePendingPings = async (pings) => {
+    await Storage.set({ key: 'pendingPings', value: JSON.stringify(pings) }).catch(() => {});
+  };
+
   const sendPing = async (data) => {
-    const pingData = {
-      ...data,
-      deviceId,
-      timestamp: new Date().toISOString()
-    };
+    const pingData = { ...data, deviceId, timestamp: new Date().toISOString() };
 
     if (!isOnline) {
-      // Queue ping for later
-      const newPendingPings = [...pendingPings, pingData];
-      setPendingPings(newPendingPings);
-      await savePendingPings(newPendingPings);
-      console.log('Ping queued (offline):', pingData);
+      const updated = [...pendingPings, pingData];
+      setPendingPings(updated);
+      await savePendingPings(updated);
       return;
     }
 
     try {
       const response = await fetch(`${API_BASE}/devices/${deviceId}/ping`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Device-ID': deviceId
-        },
-        body: JSON.stringify(pingData)
+        headers: { 'Content-Type': 'application/json', 'X-Device-ID': deviceId },
+        body: JSON.stringify(pingData),
       });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || `HTTP ${response.status}`);
-      }
-
-      console.log('Ping sent successfully');
-    } catch (error) {
-      console.error('Ping failed, queuing:', error);
-      // Queue failed ping
-      const newPendingPings = [...pendingPings, pingData];
-      setPendingPings(newPendingPings);
-      await savePendingPings(newPendingPings);
+      if (!response.ok) throw new Error('Ping failed');
+    } catch (err) {
+      const updated = [...pendingPings, pingData];
+      setPendingPings(updated);
+      await savePendingPings(updated);
     }
   };
 
   const syncPendingPings = async () => {
     if (!isOnline || pendingPings.length === 0) return;
-
-    console.log(`Syncing ${pendingPings.length} pending pings...`);
-
-    const successfulPings = [];
-    const failedPings = [];
-
+    const failed = [];
     for (const ping of pendingPings) {
       try {
-        const response = await fetch(`${API_BASE}/devices/${deviceId}/ping`, {
+        const res = await fetch(`${API_BASE}/devices/${deviceId}/ping`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Device-ID': deviceId
-          },
-          body: JSON.stringify(ping)
+          headers: { 'Content-Type': 'application/json', 'X-Device-ID': deviceId },
+          body: JSON.stringify(ping),
         });
-
-        if (response.ok) {
-          successfulPings.push(ping);
-        } else {
-          failedPings.push(ping);
-        }
-      } catch (error) {
-        failedPings.push(ping);
+        if (!res.ok) failed.push(ping);
+      } catch (e) {
+        failed.push(ping);
       }
     }
-
-    if (successfulPings.length > 0) {
-      console.log(`Successfully synced ${successfulPings.length} pings`);
-    }
-
-    setPendingPings(failedPings);
-    await savePendingPings(failedPings);
+    setPendingPings(failed);
+    await savePendingPings(failed);
   };
 
-  const getDistance = (lat1, lng1, lat2, lng2) => {
-    const R = 6371e3; // metres
-    const φ1 = lat1 * Math.PI / 180;
-    const φ2 = lat2 * Math.PI / 180;
-    const Δφ = (lat2 - lat1) * Math.PI / 180;
-    const Δλ = (lng2 - lng1) * Math.PI / 180;
-
-    const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
-              Math.cos(φ1) * Math.cos(φ2) *
-              Math.sin(Δλ/2) * Math.sin(Δλ/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-
-    return R * c;
-  };
-
+  // =============================================
+  // COMMAND EXECUTION
+  // =============================================
   const executeCommand = async (cmd) => {
     try {
-      console.log('Executing command:', cmd.command);
-
       switch (cmd.command) {
         case 'alarm':
-          // Play alarm sound (simplified, in real app use audio API or plugin)
           if (Capacitor.isNativePlatform()) {
-            // In real app, use native audio or vibration
-            alert('🚨 ALARM! Device is being tracked!');
-          } else {
-            alert('ALARM! Device is being tracked!');
+            // Native alarm with vibration
           }
           break;
 
@@ -392,146 +371,271 @@ function App() {
             const image = await Camera.getPhoto({
               quality: 90,
               allowEditing: false,
-              resultType: CameraResultType.Base64
+              resultType: CameraResultType.Base64,
             });
-
-            // Send photo to server
             await fetch(`${API_BASE}/devices/${deviceId}/photo`, {
               method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'X-Device-ID': deviceId
-              },
-              body: JSON.stringify({ photo: image.base64String })
+              headers: { 'Content-Type': 'application/json', 'X-Device-ID': deviceId },
+              body: JSON.stringify({ photo: image.base64String }),
             });
-          } else {
-            console.log('Camera not available in web mode');
           }
           break;
 
         case 'geofence':
-          const params = JSON.parse(cmd.params);
+          const params = typeof cmd.params === 'string' ? JSON.parse(cmd.params) : cmd.params;
           setGeofence(params);
           await Storage.set({ key: 'geofence', value: JSON.stringify(params) });
-          console.log('Geofence set:', params);
           break;
 
         default:
-          console.log('Unknown command:', cmd.command);
+          break;
       }
 
-      // Mark as executed
+      // Mark command as executed
       await fetch(`${API_BASE}/commands/${cmd.id}/executed`, {
         method: 'POST',
-        headers: { 'X-Device-ID': deviceId }
-      });
-
-    } catch (error) {
-      console.error('Command execution failed:', error);
-      setError(`Command execution failed: ${error.message}`);
+        headers: { 'X-Device-ID': deviceId },
+      }).catch(() => {});
+    } catch (err) {
+      console.error('Command execution failed:', err);
     }
   };
 
-  // Battery monitoring
-  const startBatteryMonitoring = async () => {
-    if (Capacitor.isNativePlatform()) {
-      try {
-        // In real app, use Battery plugin or native APIs
-        // For now, simulate battery monitoring
-        const updateBattery = () => {
-          // Simulate battery level (in real app, get from device)
-          const simulatedLevel = Math.max(10, Math.min(100, batteryLevel - Math.random() * 5));
-          setBatteryLevel(Math.round(simulatedLevel));
-        };
-
-        setInterval(updateBattery, 300000); // Update every 5 minutes
-      } catch (error) {
-        console.error('Battery monitoring failed:', error);
-      }
-    }
+  // =============================================
+  // HELPERS
+  // =============================================
+  const getDistance = (lat1, lng1, lat2, lng2) => {
+    const R = 6371e3;
+    const p1 = lat1 * Math.PI / 180;
+    const p2 = lat2 * Math.PI / 180;
+    const dp = (lat2 - lat1) * Math.PI / 180;
+    const dl = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(dp/2) * Math.sin(dp/2) +
+              Math.cos(p1) * Math.cos(p2) * Math.sin(dl/2) * Math.sin(dl/2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   };
 
-  // For testing, a button to simulate activation
-  const activate = () => {
-    setIsActive(true);
-    startTracking();
-    startBatteryMonitoring();
+  // =============================================
+  // RENDER
+  // =============================================
+
+  // Shared styles
+  const styles = {
+    container: {
+      minHeight: '100vh',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      background: 'linear-gradient(135deg, #0a1628 0%, #1a237e 50%, #0d47a1 100%)',
+      color: '#fff',
+      padding: '20px',
+    },
+    card: {
+      background: 'rgba(255,255,255,0.08)',
+      backdropFilter: 'blur(20px)',
+      borderRadius: '20px',
+      padding: '40px 30px',
+      width: '100%',
+      maxWidth: '380px',
+      boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+      border: '1px solid rgba(255,255,255,0.1)',
+    },
+    input: {
+      width: '100%',
+      padding: '14px 16px',
+      borderRadius: '12px',
+      border: '1px solid rgba(255,255,255,0.2)',
+      background: 'rgba(255,255,255,0.06)',
+      color: '#fff',
+      fontSize: '16px',
+      outline: 'none',
+      marginBottom: '16px',
+      boxSizing: 'border-box',
+    },
+    button: {
+      width: '100%',
+      padding: '16px',
+      borderRadius: '12px',
+      border: 'none',
+      background: 'linear-gradient(135deg, #1a73e8, #0d47a1)',
+      color: '#fff',
+      fontSize: '16px',
+      fontWeight: '600',
+      cursor: 'pointer',
+      marginTop: '8px',
+    },
+    error: {
+      background: 'rgba(244,67,54,0.15)',
+      border: '1px solid rgba(244,67,54,0.3)',
+      borderRadius: '12px',
+      padding: '12px 16px',
+      marginBottom: '16px',
+      fontSize: '14px',
+      color: '#ff8a80',
+    },
   };
 
-  return (
-    <div className="App" style={{ padding: '20px', fontFamily: 'Arial, sans-serif' }}>
-      <h1>🔒 Sercret Security</h1>
-
-      <div style={{ margin: '20px 0', padding: '15px', border: '1px solid #ccc', borderRadius: '8px' }}>
-        <div><strong>Device ID:</strong> {deviceId || 'Loading...'}</div>
-        <div><strong>Status:</strong>
-          <span style={{
-            color: isActive ? '#d32f2f' : '#388e3c',
-            fontWeight: 'bold',
-            marginLeft: '8px'
-          }}>
-            {isActive ? '🟢 ACTIVE (Tracking)' : '⚪ DORMANT'}
-          </span>
-        </div>
-        <div><strong>Network:</strong>
-          <span style={{ color: isOnline ? '#388e3c' : '#f57c00', marginLeft: '8px' }}>
-            {isOnline ? '🟢 Online' : '🟠 Offline'}
-          </span>
-        </div>
-        <div><strong>Server:</strong>
-          <span style={{ color: isConnected ? '#388e3c' : '#f57c00', marginLeft: '8px' }}>
-            {isConnected ? '🟢 Connected' : '🟠 Disconnected'}
-          </span>
-        </div>
-        <div><strong>Battery:</strong> {batteryLevel}%</div>
-        {geofence && (
-          <div><strong>Geofence:</strong> {geofence.lat.toFixed(4)}, {geofence.lng.toFixed(4)} (radius: {geofence.radius}m)</div>
-        )}
-        {pendingPings.length > 0 && (
-          <div><strong>Pending Pings:</strong> {pendingPings.length}</div>
-        )}
+  // LOADING SCREEN
+  if (screen === SCREEN.LOADING) {
+    return (
+      <div style={styles.container}>
+        <div style={{ fontSize: '48px', marginBottom: '20px' }}>🛡️</div>
+        <div style={{ fontSize: '14px', opacity: 0.7 }}>Initializing...</div>
       </div>
+    );
+  }
 
-      {error && (
-        <div style={{
-          margin: '20px 0',
-          padding: '15px',
-          backgroundColor: '#ffebee',
-          border: '1px solid #f44336',
-          borderRadius: '8px',
-          color: '#c62828'
-        }}>
-          <strong>Error:</strong> {error}
+  // LOGIN SCREEN - Member ID & Password entry
+  if (screen === SCREEN.LOGIN) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.card}>
+          <div style={{ textAlign: 'center', marginBottom: '30px' }}>
+            <div style={{ fontSize: '48px', marginBottom: '12px' }}>🛡️</div>
+            <h1 style={{ margin: '0 0 8px', fontSize: '24px', fontWeight: '700' }}>Ysecurity</h1>
+            <p style={{ margin: 0, fontSize: '14px', opacity: 0.7 }}>Enter your Member ID to install protection</p>
+          </div>
+
+          {error && (
+            <div style={styles.error}>{error}</div>
+          )}
+
+          <input
+            style={styles.input}
+            type="text"
+            placeholder="Member ID (e.g., YS-123456)"
+            value={memberId}
+            onChange={(e) => setMemberId(e.target.value.toUpperCase())}
+            maxLength={9}
+            autoCapitalize="characters"
+          />
+
+          <input
+            style={styles.input}
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+
           <button
-            onClick={() => setError(null)}
-            style={{ marginLeft: '10px', padding: '5px 10px', cursor: 'pointer' }}
+            style={{
+              ...styles.button,
+              opacity: isLoggingIn ? 0.6 : 1,
+              cursor: isLoggingIn ? 'not-allowed' : 'pointer',
+            }}
+            onClick={handleLogin}
+            disabled={isLoggingIn}
           >
-            Dismiss
+            {isLoggingIn ? 'Verifying...' : 'Install Protection'}
           </button>
+
+          <p style={{ textAlign: 'center', fontSize: '12px', opacity: 0.5, marginTop: '20px' }}>
+            Don't have a Member ID?<br />
+            Visit <strong>ysecurity.app</strong> to get one.
+          </p>
         </div>
-      )}
+      </div>
+    );
+  }
 
-      {!isActive && (
-        <button
-          onClick={activate}
-          style={{
-            padding: '12px 24px',
-            backgroundColor: '#d32f2f',
-            color: 'white',
-            border: 'none',
-            borderRadius: '8px',
-            fontSize: '16px',
-            cursor: 'pointer',
-            margin: '10px 0'
-          }}
-        >
-          🔴 Simulate Activation (Test Only)
-        </button>
-      )}
+  // INSTALLING SCREEN - Brief animation
+  if (screen === SCREEN.INSTALLING) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.card}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: '48px', marginBottom: '20px', animation: 'pulse 1.5s infinite' }}>🛡️</div>
+            <h2 style={{ margin: '0 0 12px', fontSize: '20px' }}>Installing Protection...</h2>
+            <p style={{ fontSize: '14px', opacity: 0.7, margin: 0 }}>
+              Setting up silent device monitoring
+            </p>
+            <div style={{
+              width: '60%',
+              height: '4px',
+              background: 'rgba(255,255,255,0.1)',
+              borderRadius: '2px',
+              margin: '24px auto 0',
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                width: '100%',
+                height: '100%',
+                background: 'linear-gradient(90deg, #1a73e8, #42a5f5)',
+                borderRadius: '2px',
+                animation: 'progress 2.5s ease-in-out',
+              }} />
+            </div>
+          </div>
+        </div>
+        <style>{`
+          @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.1); } }
+          @keyframes progress { 0% { width: 0; } 100% { width: 100%; } }
+        `}</style>
+      </div>
+    );
+  }
 
-      <div style={{ marginTop: '20px', fontSize: '14px', color: '#666' }}>
-        <p>This app silently monitors device location when activated by security personnel.</p>
-        <p>Location data is encrypted and only accessible after proper verification.</p>
+  // INSTALLED SCREEN - Dormant/Active status
+  return (
+    <div style={styles.container}>
+      <div style={styles.card}>
+        <div style={{ textAlign: 'center', marginBottom: '24px' }}>
+          <div style={{ fontSize: '48px', marginBottom: '12px' }}>
+            {isActive ? '🟢' : '🛡️'}
+          </div>
+          <h1 style={{ margin: '0 0 4px', fontSize: '22px' }}>Ysecurity</h1>
+          <p style={{
+            margin: 0,
+            fontSize: '14px',
+            color: isActive ? '#69f0ae' : 'rgba(255,255,255,0.5)',
+            fontWeight: '600',
+          }}>
+            {isActive ? 'ACTIVE — Tracking Enabled' : 'INSTALLED — Dormant'}
+          </p>
+        </div>
+
+        <div style={{
+          background: 'rgba(255,255,255,0.05)',
+          borderRadius: '12px',
+          padding: '16px',
+          fontSize: '13px',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+            <span style={{ opacity: 0.6 }}>Network</span>
+            <span>{isOnline ? '🟢 Online' : '🔴 Offline'}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+            <span style={{ opacity: 0.6 }}>Server</span>
+            <span>{isConnected ? '🟢 Connected' : '🔴 Disconnected'}</span>
+          </div>
+          {pendingPings.length > 0 && (
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ opacity: 0.6 }}>Queued Pings</span>
+              <span>{pendingPings.length}</span>
+            </div>
+          )}
+        </div>
+
+        {!isActive && (
+          <div style={{
+            marginTop: '20px',
+            padding: '16px',
+            background: 'rgba(255,193,7,0.1)',
+            border: '1px solid rgba(255,193,7,0.2)',
+            borderRadius: '12px',
+            fontSize: '13px',
+            textAlign: 'center',
+            color: 'rgba(255,255,255,0.7)',
+          }}>
+            Protection is dormant. It will be activated by the security team when needed.
+            <br /><br />
+            <strong style={{ color: '#ffd54f' }}>Keep your Member ID safe!</strong><br />
+            It cannot be recovered if lost.
+          </div>
+        )}
       </div>
     </div>
   );
