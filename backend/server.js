@@ -928,14 +928,7 @@ app.post('/api/members/create-checkout', [
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [{
-        price_data: {
-          currency: 'usd',
-          product_data: {
-            name: 'Ysecurity Membership',
-            description: 'One-time membership fee for device security and tracking'
-          },
-          unit_amount: 2000, // $20.00
-        },
+        price: process.env.STRIPE_MEMBERSHIP_PRICE_ID,
         quantity: 1,
       }],
       mode: 'payment',
