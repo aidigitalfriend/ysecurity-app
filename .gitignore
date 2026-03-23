@@ -46,3 +46,4 @@ coverage/
 # Temp
 tmp/
 temp/
+backend/.env

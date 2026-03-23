@@ -241,7 +241,7 @@ async function initializeDatabase() {
       INSERT INTO admins (username, password_hash, email)
       VALUES ($1, $2, $3)
       ON CONFLICT (username) DO NOTHING
-    `, ['admin', defaultPasswordHash, 'admin@sercret-security.com']);
+    `, ['admin', defaultPasswordHash, 'info@ysecurity.app']);
 
     logger.info('Database tables initialized successfully');
   } catch (error) {
@@ -253,14 +253,18 @@ async function initializeDatabase() {
 // Initialize database on startup
 initializeDatabase();
 
-// Email transporter with environment variables
+// Email transporter with environment variables (Microsoft 365 / GoDaddy)
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: process.env.EMAIL_HOST || 'smtp.office365.com',
+  port: parseInt(process.env.EMAIL_PORT) || 587,
+  secure: false,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
   },
-  secure: true
+  tls: {
+    ciphers: 'SSLv3'
+  }
 });
 
 // Socket.IO real-time features
@@ -733,7 +737,7 @@ app.post('/api/devices/:deviceId/photo', [
   // Send email notification to admin
   const mailOptions = {
     from: process.env.EMAIL_USER,
-    to: 'admin@sercret-security.com',
+    to: 'info@ysecurity.app',
     subject: `Camera capture from device ${deviceId}`,
     text: `A photo has been captured from device ${deviceId}. Check the admin dashboard for details.`,
     attachments: [{
