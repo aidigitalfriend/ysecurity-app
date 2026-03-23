@@ -996,8 +996,8 @@ app.post('/api/members/create-checkout', [
       }],
       mode: 'payment',
       customer_email: email,
-      success_url: `${process.env.API_BASE_URL || 'https://ysecurity.app'}/payment.html?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.API_BASE_URL || 'https://ysecurity.app'}/payment.html`,
+      success_url: `${process.env.API_BASE_URL || 'https://ysecurity.app'}/payment?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.API_BASE_URL || 'https://ysecurity.app'}/payment`,
       metadata: {
         memberId: memberId
       }
