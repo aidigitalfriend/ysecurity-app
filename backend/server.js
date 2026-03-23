@@ -2,6 +2,7 @@ const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
 const bodyParser = require('body-parser');
+require('dotenv').config();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const nodemailer = require('nodemailer');
 const jwt = require('jsonwebtoken');
@@ -16,7 +17,6 @@ const { Server } = require('socket.io');
 const winston = require('winston');
 const compression = require('compression');
 const crypto = require('crypto');
-require('dotenv').config();
 
 const app = express();
 app.set('trust proxy', 1);
