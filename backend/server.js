@@ -23,7 +23,7 @@ app.set('trust proxy', 1);
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+    origin: process.env.CORS_ORIGIN || (process.env.NODE_ENV === 'production' ? 'https://ysecurity.app' : 'http://localhost:3000'),
     methods: ['GET', 'POST'],
     credentials: true
   }
@@ -50,7 +50,7 @@ if (process.env.NODE_ENV !== 'production') {
   }));
 }
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 4000;
 
 // Security middleware
 app.use(helmet({
@@ -61,7 +61,7 @@ app.use(helmet({
       scriptSrc: ["'self'", "https://unpkg.com", "https://cdn.socket.io", "https://js.stripe.com"],
       imgSrc: ["'self'", "data:", "https:"],
       frameSrc: ["'self'", "https://js.stripe.com"],
-      connectSrc: ["'self'", "https://api.stripe.com"],
+      connectSrc: ["'self'", "https://api.stripe.com", "wss:", "ws:"],
     },
   },
 }));
@@ -83,7 +83,7 @@ app.use(morgan('combined', {
 
 // Middleware
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+  origin: process.env.CORS_ORIGIN || (process.env.NODE_ENV === 'production' ? 'https://ysecurity.app' : 'http://localhost:3000'),
   credentials: true
 }));
 app.use(bodyParser.json({ limit: '10mb' }));
@@ -992,6 +992,73 @@ app.post('/api/members/login', [
   } catch (error) {
     logger.error('Member login error:', error);
     res.status(500).json({ success: false, error: 'Login failed' });
+  }
+});
+
+// ========================================
+// Admin Dashboard API Endpoints
+// ========================================
+
+// Get all members (admin)
+app.get('/api/admin/members', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+  try {
+    const result = await pool.query(
+      'SELECT member_id, name, email, payment_status, created_at FROM members ORDER BY created_at DESC'
+    );
+    res.json({ success: true, members: result.rows });
+  } catch (error) {
+    logger.error('Failed to fetch members:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch members' });
+  }
+});
+
+// Get all reports (admin)
+app.get('/api/admin/reports', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+  try {
+    const result = await pool.query(
+      'SELECT id, device_id, status, created_at FROM reports ORDER BY created_at DESC'
+    );
+    res.json({ success: true, reports: result.rows });
+  } catch (error) {
+    logger.error('Failed to fetch reports:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch reports' });
+  }
+});
+
+// Verify a report (admin)
+app.post('/api/admin/reports/:reportId/verify', [
+  authenticateToken,
+  param('reportId').isInt({ min: 1 }).withMessage('Invalid report ID'),
+  handleValidationErrors
+], async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+  const { reportId } = req.params;
+  try {
+    const result = await pool.query(
+      'UPDATE reports SET status = $1 WHERE id = $2 RETURNING device_id',
+      ['verified', reportId]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Report not found' });
+    }
+    // Also update the device status to verified
+    await pool.query(
+      'UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      ['verified', result.rows[0].device_id]
+    );
+    logger.info(`Report ${reportId} verified by admin ${req.user.username}`);
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('Failed to verify report:', error);
+    res.status(500).json({ success: false, error: 'Failed to verify report' });
   }
 });
 
