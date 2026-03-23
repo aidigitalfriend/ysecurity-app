@@ -52,19 +52,12 @@ function AdminDashboard() {
 
   const loadAnalytics = async () => {
     try {
-      const response = await fetch(`${API_BASE}/admin/devices`, {
+      const response = await fetch(`${API_BASE}/admin/analytics`, {
         headers: { 'Authorization': `Bearer ${authToken}` }
       });
       const data = await response.json();
       if (data.success) {
-        const total = data.devices.length;
-        const active = data.devices.filter(d => d.status === 'active').length;
-        setAnalytics({
-          totalDevices: total,
-          activeDevices: active,
-          locationPings: 0, // Would need additional API endpoint
-          alertsToday: 0 // Would need additional API endpoint
-        });
+        setAnalytics(data.analytics);
       }
     } catch (error) {
       console.error('Failed to load analytics:', error);
@@ -340,7 +333,7 @@ function AdminDashboard() {
         </TabPanel>
 
         <TabPanel value={tabValue} index={4}>
-          <ReportsTab />
+          <ReportsTab authToken={authToken} />
         </TabPanel>
       </Container>
 
@@ -686,9 +679,15 @@ function TrackingTab({ locations, selectedDevice }) {
 // Analytics Tab Component
 function AnalyticsTab({ analytics }) {
   const deviceStatusData = [
-    { name: 'Active', value: analytics.activeDevices, color: '#f44336' },
-    { name: 'Inactive', value: analytics.totalDevices - analytics.activeDevices, color: '#4caf50' }
-  ];
+    { name: 'Active', value: analytics.activeDevices || 0, color: '#f44336' },
+    { name: 'Dormant', value: analytics.dormantDevices || 0, color: '#9e9e9e' },
+    { name: 'Reported', value: analytics.reportedDevices || 0, color: '#ff9800' }
+  ].filter(d => d.value > 0);
+
+  const timelineData = (analytics.timeline || []).map(t => ({
+    time: format(new Date(t.time), 'HH:mm'),
+    pings: t.pings
+  }));
 
   return (
     <Grid container spacing={3}>
@@ -699,7 +698,7 @@ function AnalyticsTab({ analytics }) {
               Total Devices
             </Typography>
             <Typography variant="h4">
-              {analytics.totalDevices}
+              {analytics.totalDevices || 0}
             </Typography>
           </CardContent>
         </Card>
@@ -711,7 +710,7 @@ function AnalyticsTab({ analytics }) {
               Active Tracking
             </Typography>
             <Typography variant="h4" color="error">
-              {analytics.activeDevices}
+              {analytics.activeDevices || 0}
             </Typography>
           </CardContent>
         </Card>
@@ -723,7 +722,7 @@ function AnalyticsTab({ analytics }) {
               Location Pings
             </Typography>
             <Typography variant="h4" color="primary">
-              {analytics.locationPings}
+              {analytics.locationPings || 0}
             </Typography>
           </CardContent>
         </Card>
@@ -735,11 +734,24 @@ function AnalyticsTab({ analytics }) {
               Alerts Today
             </Typography>
             <Typography variant="h4" color="warning.main">
-              {analytics.alertsToday}
+              {analytics.alertsToday || 0}
             </Typography>
           </CardContent>
         </Card>
       </Grid>
+      <Grid item xs={12} md={3}>
+        <Card>
+          <CardContent>
+            <Typography color="textSecondary" gutterBottom>
+              Total Members
+            </Typography>
+            <Typography variant="h4" color="success.main">
+              {analytics.totalMembers || 0}
+            </Typography>
+          </CardContent>
+        </Card>
+      </Grid>
+      <Grid item xs={12} md={9} />
       <Grid item xs={12} md={6}>
         <Card>
           <CardContent>
@@ -772,17 +784,23 @@ function AnalyticsTab({ analytics }) {
         <Card>
           <CardContent>
             <Typography variant="h6" gutterBottom>
-              Activity Timeline
+              Activity Timeline (24h)
             </Typography>
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={[]}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="time" />
-                <YAxis />
-                <Tooltip />
-                <Line type="monotone" dataKey="pings" stroke="#8884d8" />
-              </LineChart>
-            </ResponsiveContainer>
+            {timelineData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <LineChart data={timelineData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="time" />
+                  <YAxis />
+                  <Tooltip />
+                  <Line type="monotone" dataKey="pings" stroke="#1a73e8" strokeWidth={2} dot={{ r: 3 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <Box sx={{ height: 300, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Typography color="textSecondary">No activity in the last 24 hours</Typography>
+              </Box>
+            )}
           </CardContent>
         </Card>
       </Grid>
@@ -791,42 +809,83 @@ function AnalyticsTab({ analytics }) {
 }
 
 // Reports Tab Component
-function ReportsTab() {
+function ReportsTab({ authToken }) {
   const [reports, setReports] = useState([]);
+  const [loading, setLoading] = useState(true);
 
-  // Mock reports data - in real app, fetch from API
   useEffect(() => {
-    setReports([
-      { id: 1, type: 'Geofence Breach', device: 'DEV001', time: new Date(), status: 'Active' },
-      { id: 2, type: 'SIM Change', device: 'DEV002', time: new Date(Date.now() - 3600000), status: 'Resolved' },
-      { id: 3, type: 'Low Battery', device: 'DEV003', time: new Date(Date.now() - 7200000), status: 'Active' }
-    ]);
+    loadReports();
   }, []);
+
+  const loadReports = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/admin/reports`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      const data = await response.json();
+      if (data.success) {
+        setReports(data.reports);
+      }
+    } catch (error) {
+      console.error('Failed to load reports:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getStatusColor = (status) => {
+    switch (status) {
+      case 'pending': return 'warning';
+      case 'verified': return 'success';
+      case 'rejected': return 'error';
+      default: return 'default';
+    }
+  };
 
   return (
     <Card>
       <CardContent>
         <Typography variant="h6" gutterBottom>
-          Recent Reports & Alerts
+          Reports & Alerts
         </Typography>
-        <List>
-          {reports.map((report) => (
-            <div key={report.id}>
-              <ListItem>
-                <ListItemText
-                  primary={`${report.type} - Device ${report.device}`}
-                  secondary={`Time: ${format(report.time, 'MMM dd, yyyy HH:mm:ss')} | Status: ${report.status}`}
-                />
-                <Chip
-                  label={report.status}
-                  color={report.status === 'Active' ? 'error' : 'success'}
-                  size="small"
-                />
-              </ListItem>
-              <Divider />
-            </div>
-          ))}
-        </List>
+        {loading ? (
+          <Typography color="textSecondary">Loading reports...</Typography>
+        ) : reports.length === 0 ? (
+          <Typography color="textSecondary">No reports yet</Typography>
+        ) : (
+          <TableContainer component={Paper}>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableCell>ID</TableCell>
+                  <TableCell>Device</TableCell>
+                  <TableCell>Info</TableCell>
+                  <TableCell>Last Alert</TableCell>
+                  <TableCell>Status</TableCell>
+                  <TableCell>Created</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {reports.map((report) => (
+                  <TableRow key={report.id}>
+                    <TableCell>#{report.id}</TableCell>
+                    <TableCell>{report.device_id ? `${report.device_id.substring(0, 12)}...` : '—'}</TableCell>
+                    <TableCell>{report.user_info || '—'}</TableCell>
+                    <TableCell>{report.last_alert || '—'}</TableCell>
+                    <TableCell>
+                      <Chip
+                        label={report.status}
+                        color={getStatusColor(report.status)}
+                        size="small"
+                      />
+                    </TableCell>
+                    <TableCell>{format(new Date(report.created_at), 'MMM dd, yyyy HH:mm')}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        )}
       </CardContent>
     </Card>
   );

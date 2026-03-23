@@ -1216,6 +1216,43 @@ app.delete('/api/admin/members/:memberId', [
   }
 });
 
+// Analytics endpoint (admin)
+app.get('/api/admin/analytics', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+  try {
+    const [devicesResult, pingsResult, alertsResult, timelineResult, membersResult] = await Promise.all([
+      pool.query(`SELECT status, COUNT(*)::int as count FROM devices GROUP BY status`),
+      pool.query(`SELECT COUNT(*)::int as total FROM location_pings`),
+      pool.query(`SELECT COUNT(*)::int as total FROM location_pings WHERE alert IS NOT NULL AND timestamp::date = CURRENT_DATE`),
+      pool.query(`SELECT date_trunc('hour', timestamp) as time, COUNT(*)::int as pings FROM location_pings WHERE timestamp > NOW() - INTERVAL '24 hours' GROUP BY date_trunc('hour', timestamp) ORDER BY time`),
+      pool.query(`SELECT COUNT(*)::int as total FROM members WHERE payment_status = 'completed'`)
+    ]);
+
+    const statusCounts = {};
+    let totalDevices = 0;
+    devicesResult.rows.forEach(r => { statusCounts[r.status] = r.count; totalDevices += r.count; });
+
+    res.json({
+      success: true,
+      analytics: {
+        totalDevices,
+        activeDevices: statusCounts['active'] || 0,
+        dormantDevices: statusCounts['installed'] || 0,
+        reportedDevices: statusCounts['reported'] || 0,
+        totalMembers: membersResult.rows[0].total,
+        locationPings: pingsResult.rows[0].total,
+        alertsToday: alertsResult.rows[0].total,
+        timeline: timelineResult.rows.map(r => ({ time: r.time, pings: r.pings }))
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to fetch analytics:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch analytics' });
+  }
+});
+
 // Get all reports (admin)
 app.get('/api/admin/reports', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
@@ -1223,7 +1260,15 @@ app.get('/api/admin/reports', authenticateToken, async (req, res) => {
   }
   try {
     const result = await pool.query(
-      'SELECT id, device_id, status, created_at FROM reports ORDER BY created_at DESC'
+      `SELECT r.id, r.device_id, r.user_info, r.status, r.created_at,
+       lp.alert as last_alert, lp.timestamp as alert_time
+       FROM reports r
+       LEFT JOIN LATERAL (
+         SELECT alert, timestamp FROM location_pings
+         WHERE device_id = r.device_id AND alert IS NOT NULL
+         ORDER BY timestamp DESC LIMIT 1
+       ) lp ON true
+       ORDER BY r.created_at DESC`
     );
     res.json({ success: true, reports: result.rows });
   } catch (error) {
