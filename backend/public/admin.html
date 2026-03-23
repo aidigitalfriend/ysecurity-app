@@ -21,7 +21,7 @@
     <div id="map"></div>
 
     <script>
-        const API_BASE = 'http://localhost:3000/api';
+        const API_BASE = '/api';
         let map;
         let markers = {};
         let socket;
@@ -29,7 +29,7 @@
 
         // Initialize Socket.IO
         function initSocket() {
-            socket = io('http://localhost:3000');
+            socket = io();
 
             socket.on('authenticated', (data) => {
                 if (data.success) {

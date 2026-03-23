@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Get Member ID - Ysecurity</title>
+  <meta name="description" content="Create your Ysecurity membership. Pay $20 one-time and get your unique Member ID to protect your tablet or mobile device.">
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+</head>
+<body>
+
+<nav class="navbar">
+  <div class="nav-container">
+    <a href="/" class="nav-logo"><span class="shield">🛡️</span> Ysecurity</a>
+    <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('active')">☰</button>
+    <ul class="nav-links">
+      <li><a href="/">Home</a></li>
+      <li><a href="/services.html">Services</a></li>
+      <li><a href="/privacy.html">Privacy</a></li>
+      <li><a href="/terms.html">Terms</a></li>
+      <li><a href="/payment.html" class="btn btn-primary" style="padding:8px 20px;font-size:0.9rem;">Get Started</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="page-header">
+  <h1>Get Your Member ID</h1>
+  <p>One-time payment of $20 — lifetime device protection</p>
+</div>
+
+<!-- Payment Form -->
+<div class="payment-container" id="payment-section">
+  <div class="payment-box">
+    <h2>🛡️ Create Membership</h2>
+    <div class="alert alert-info">
+      <strong>What you'll get:</strong> A unique Member ID and password to install the app and recover your device if lost.
+    </div>
+
+    <div id="error-msg" class="alert alert-error" style="display:none;"></div>
+
+    <form id="payment-form" onsubmit="handlePayment(event)">
+      <div class="form-group">
+        <label for="email">Email Address</label>
+        <input type="email" id="email" name="email" required placeholder="you@example.com" autocomplete="email">
+      </div>
+      <div class="form-group">
+        <label for="name">Full Name</label>
+        <input type="text" id="name" name="name" required placeholder="Your full name" minlength="2" maxlength="100" autocomplete="name">
+      </div>
+
+      <div style="background:var(--bg);padding:16px;border-radius:8px;margin-bottom:20px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <span style="font-weight:600;">Ysecurity Membership</span>
+          <span style="font-size:1.4rem;font-weight:800;color:var(--primary);">$20</span>
+        </div>
+        <div style="font-size:0.85rem;color:var(--gray);margin-top:4px;">One-time payment • No subscription</div>
+      </div>
+
+      <div class="form-group">
+        <label>
+          <input type="checkbox" id="agree-terms" required>
+          I agree to the <a href="/terms.html" target="_blank">Terms of Service</a> and <a href="/privacy.html" target="_blank">Privacy Policy</a>
+        </label>
+      </div>
+
+      <button type="submit" id="pay-btn" class="btn btn-primary btn-lg" style="width:100%;">
+        Pay $20 &amp; Get Member ID
+      </button>
+    </form>
+
+    <p style="text-align:center;margin-top:16px;font-size:0.85rem;color:var(--gray);">
+      🔒 Secure payment via Stripe. We never store your card details.
+    </p>
+  </div>
+</div>
+
+<!-- Success Section (hidden by default) -->
+<div class="success-container" id="success-section" style="display:none;">
+  <div class="success-box">
+    <div class="success-icon">✅</div>
+    <h2>Payment Successful!</h2>
+    <p style="color:var(--gray);margin:12px 0 0;">Your Ysecurity membership is now active. Here are your credentials:</p>
+
+    <div class="member-credentials">
+      <div class="field">
+        <div class="field-label">Member ID</div>
+        <div class="field-value" id="member-id-display">—</div>
+      </div>
+      <div class="field">
+        <div class="field-label">Password</div>
+        <div class="field-value" id="member-password-display">—</div>
+      </div>
+      <div class="field">
+        <div class="field-label">Email</div>
+        <div class="field-value" id="member-email-display" style="font-size:1rem;">—</div>
+      </div>
+    </div>
+
+    <div class="alert alert-info">
+      <strong>Important:</strong> Save your Member ID and password securely! You will need them to install the app and to recover your device if lost.
+    </div>
+
+    <p style="color:var(--gray);font-size:0.9rem;margin-bottom:20px;">
+      These credentials have also been sent to your email.
+    </p>
+
+    <a href="/" class="btn btn-primary" style="width:100%;">Back to Home</a>
+  </div>
+</div>
+
+<footer class="footer">
+  <div class="footer-container">
+    <div>
+      <h4>🛡️ Ysecurity</h4>
+      <p style="font-size:0.9rem;color:var(--gray);">Smart device security for<br>tablets &amp; mobile devices.</p>
+    </div>
+    <div>
+      <h4>Product</h4>
+      <ul>
+        <li><a href="/services.html">Services</a></li>
+        <li><a href="/payment.html">Get Member ID</a></li>
+      </ul>
+    </div>
+    <div>
+      <h4>Legal</h4>
+      <ul>
+        <li><a href="/privacy.html">Privacy Policy</a></li>
+        <li><a href="/terms.html">Terms of Service</a></li>
+      </ul>
+    </div>
+    <div>
+      <h4>Contact</h4>
+      <ul>
+        <li><a href="mailto:support@ysecurity.app">support@ysecurity.app</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="footer-bottom">&copy; 2026 Ysecurity. All rights reserved.</div>
+</footer>
+
+<script>
+  // Check if returning from Stripe success
+  const urlParams = new URLSearchParams(window.location.search);
+  const sessionId = urlParams.get('session_id');
+
+  if (sessionId) {
+    // Verify the payment and show member credentials
+    verifyPayment(sessionId);
+  }
+
+  async function handlePayment(e) {
+    e.preventDefault();
+    const btn = document.getElementById('pay-btn');
+    const errorMsg = document.getElementById('error-msg');
+    errorMsg.style.display = 'none';
+
+    const email = document.getElementById('email').value.trim();
+    const name = document.getElementById('name').value.trim();
+
+    if (!email || !name) {
+      errorMsg.textContent = 'Please fill in all fields.';
+      errorMsg.style.display = 'block';
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Processing...';
+
+    try {
+      const response = await fetch('/api/members/create-checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, name })
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.url) {
+        // Redirect to Stripe checkout
+        window.location.href = data.url;
+      } else {
+        errorMsg.textContent = data.error || 'Payment initialization failed. Please try again.';
+        errorMsg.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = 'Pay $20 & Get Member ID';
+      }
+    } catch (err) {
+      errorMsg.textContent = 'An error occurred. Please try again.';
+      errorMsg.style.display = 'block';
+      btn.disabled = false;
+      btn.textContent = 'Pay $20 & Get Member ID';
+    }
+  }
+
+  async function verifyPayment(sessionId) {
+    document.getElementById('payment-section').style.display = 'none';
+
+    try {
+      const response = await fetch('/api/members/verify-payment?session_id=' + encodeURIComponent(sessionId));
+      const data = await response.json();
+
+      if (data.success) {
+        document.getElementById('member-id-display').textContent = data.memberId;
+        document.getElementById('member-password-display').textContent = data.password;
+        document.getElementById('member-email-display').textContent = data.email;
+        document.getElementById('success-section').style.display = 'block';
+      } else {
+        // Payment not verified, show form again
+        document.getElementById('payment-section').style.display = 'block';
+        const errorMsg = document.getElementById('error-msg');
+        errorMsg.textContent = data.error || 'Payment verification failed. Contact support if you were charged.';
+        errorMsg.style.display = 'block';
+      }
+    } catch (err) {
+      document.getElementById('payment-section').style.display = 'block';
+      const errorMsg = document.getElementById('error-msg');
+      errorMsg.textContent = 'An error occurred verifying your payment. Contact support.';
+      errorMsg.style.display = 'block';
+    }
+  }
+</script>
+
+</body>
+</html>

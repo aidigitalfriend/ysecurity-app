@@ -15,6 +15,7 @@ const { createServer } = require('http');
 const { Server } = require('socket.io');
 const winston = require('winston');
 const compression = require('compression');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
@@ -55,9 +56,11 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com"],
-      scriptSrc: ["'self'", "https://unpkg.com"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com", "https://cdn.socket.io"],
+      scriptSrc: ["'self'", "https://unpkg.com", "https://cdn.socket.io", "https://js.stripe.com"],
       imgSrc: ["'self'", "data:", "https:"],
+      frameSrc: ["'self'", "https://js.stripe.com"],
+      connectSrc: ["'self'", "https://api.stripe.com"],
     },
   },
 }));
@@ -199,6 +202,22 @@ async function initializeDatabase() {
         command TEXT NOT NULL,
         params TEXT,
         executed BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create members table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS members (
+        id SERIAL PRIMARY KEY,
+        member_id TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        password_plain TEXT,
+        stripe_session_id TEXT UNIQUE,
+        stripe_payment_id TEXT,
+        payment_status TEXT DEFAULT 'pending' CHECK (payment_status IN ('pending', 'completed', 'failed')),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -757,15 +776,232 @@ app.post('/api/reports', [
   }
 });
 
+// ========================================
+// Member ID & Payment System
+// ========================================
+
+// Generate unique member ID (YS-XXXXXX)
+function generateMemberId() {
+  const num = crypto.randomInt(100000, 999999);
+  return `YS-${num}`;
+}
+
+// Generate secure password (12 chars)
+function generatePassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  let password = '';
+  for (let i = 0; i < 12; i++) {
+    password += chars.charAt(crypto.randomInt(chars.length));
+  }
+  return password;
+}
+
+// Create Stripe checkout session for membership
+app.post('/api/members/create-checkout', [
+  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+  body('name').isLength({ min: 2, max: 100 }).trim().escape().withMessage('Name is required'),
+  handleValidationErrors
+], async (req, res) => {
+  const { email, name } = req.body;
+
+  try {
+    // Check if email already has a completed membership
+    const existing = await pool.query(
+      'SELECT member_id FROM members WHERE email = $1 AND payment_status = $2',
+      [email, 'completed']
+    );
+    if (existing.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'This email already has an active membership (Member ID: ' + existing.rows[0].member_id + '). Check your email for your credentials.'
+      });
+    }
+
+    // Generate unique member ID
+    let memberId;
+    let isUnique = false;
+    while (!isUnique) {
+      memberId = generateMemberId();
+      const check = await pool.query('SELECT id FROM members WHERE member_id = $1', [memberId]);
+      if (check.rows.length === 0) isUnique = true;
+    }
+
+    // Generate password
+    const password = generatePassword();
+    const passwordHash = bcrypt.hashSync(password, 12);
+
+    // Create Stripe checkout session
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: 'Ysecurity Membership',
+            description: 'One-time membership fee for device security and tracking'
+          },
+          unit_amount: 2000, // $20.00
+        },
+        quantity: 1,
+      }],
+      mode: 'payment',
+      customer_email: email,
+      success_url: `${process.env.API_BASE_URL || 'https://ysecurity.app'}/payment.html?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.API_BASE_URL || 'https://ysecurity.app'}/payment.html`,
+      metadata: {
+        memberId: memberId,
+        memberName: name
+      }
+    });
+
+    // Save pending member record
+    await pool.query(
+      'INSERT INTO members (member_id, email, name, password_hash, password_plain, stripe_session_id, payment_status) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (email) DO UPDATE SET member_id = $1, name = $3, password_hash = $4, password_plain = $5, stripe_session_id = $6, payment_status = $7',
+      [memberId, email, name, passwordHash, password, session.id, 'pending']
+    );
+
+    logger.info(`Checkout session created for ${email}, member ID: ${memberId}`);
+    res.json({ success: true, sessionId: session.id, url: session.url });
+  } catch (error) {
+    logger.error('Checkout creation error:', error);
+    res.status(500).json({ success: false, error: 'Failed to create checkout session' });
+  }
+});
+
+// Verify payment and return member credentials
+app.get('/api/members/verify-payment', async (req, res) => {
+  const sessionId = req.query.session_id;
+
+  if (!sessionId || typeof sessionId !== 'string' || sessionId.length > 200) {
+    return res.status(400).json({ success: false, error: 'Invalid session ID' });
+  }
+
+  try {
+    // Get session from Stripe
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    if (session.payment_status !== 'paid') {
+      return res.status(400).json({ success: false, error: 'Payment not completed' });
+    }
+
+    // Find member by stripe session ID
+    const result = await pool.query(
+      'SELECT member_id, email, password_plain, payment_status FROM members WHERE stripe_session_id = $1',
+      [sessionId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Member record not found' });
+    }
+
+    const member = result.rows[0];
+
+    // Update payment status if still pending
+    if (member.payment_status !== 'completed') {
+      await pool.query(
+        'UPDATE members SET payment_status = $1, stripe_payment_id = $2 WHERE stripe_session_id = $3',
+        ['completed', session.payment_intent, sessionId]
+      );
+
+      // Send credentials email
+      try {
+        const mailOptions = {
+          from: process.env.EMAIL_USER,
+          to: member.email,
+          subject: 'Your Ysecurity Member ID & Password',
+          html: `
+            <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px;">
+              <h2 style="color:#1a73e8;">🛡️ Welcome to Ysecurity!</h2>
+              <p>Your membership is now active. Here are your credentials:</p>
+              <div style="background:#f8f9fa;padding:20px;border-radius:8px;margin:20px 0;">
+                <p style="margin:0 0 8px;"><strong>Member ID:</strong></p>
+                <p style="font-size:1.4rem;font-weight:bold;color:#1a73e8;margin:0 0 16px;font-family:monospace;">${member.member_id}</p>
+                <p style="margin:0 0 8px;"><strong>Password:</strong></p>
+                <p style="font-size:1.4rem;font-weight:bold;color:#1a73e8;margin:0;font-family:monospace;">${member.password_plain}</p>
+              </div>
+              <p style="color:#ea4335;"><strong>⚠️ Important:</strong> Save these credentials securely! Your password is needed to recover your device if lost.</p>
+              <p style="color:#5f6368;font-size:0.9rem;">Use your Member ID and password to install and activate the Ysecurity app on your tablet or mobile device.</p>
+              <hr style="border:none;border-top:1px solid #e8eaed;margin:24px 0;">
+              <p style="color:#5f6368;font-size:0.8rem;">Ysecurity - Smart Device Security<br>https://ysecurity.app</p>
+            </div>
+          `
+        };
+        transporter.sendMail(mailOptions);
+      } catch (emailErr) {
+        logger.error('Failed to send credentials email:', emailErr);
+      }
+    }
+
+    res.json({
+      success: true,
+      memberId: member.member_id,
+      password: member.password_plain,
+      email: member.email
+    });
+  } catch (error) {
+    logger.error('Payment verification error:', error);
+    res.status(500).json({ success: false, error: 'Payment verification failed' });
+  }
+});
+
+// Member login (for app authentication)
+app.post('/api/members/login', [
+  body('memberId').matches(/^YS-\d{6}$/).withMessage('Invalid Member ID format'),
+  body('password').isLength({ min: 8 }).withMessage('Password required'),
+  handleValidationErrors
+], async (req, res) => {
+  const { memberId, password } = req.body;
+
+  try {
+    const result = await pool.query(
+      'SELECT id, member_id, email, name, password_hash, payment_status FROM members WHERE member_id = $1',
+      [memberId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ success: false, error: 'Invalid Member ID or password' });
+    }
+
+    const member = result.rows[0];
+
+    if (member.payment_status !== 'completed') {
+      return res.status(403).json({ success: false, error: 'Membership payment not completed' });
+    }
+
+    if (!bcrypt.compareSync(password, member.password_hash)) {
+      return res.status(401).json({ success: false, error: 'Invalid Member ID or password' });
+    }
+
+    const token = jwt.sign(
+      { id: member.id, memberId: member.member_id, email: member.email, role: 'member' },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    logger.info(`Member ${memberId} logged in`);
+    res.json({
+      success: true,
+      token,
+      member: { memberId: member.member_id, email: member.email, name: member.name }
+    });
+  } catch (error) {
+    logger.error('Member login error:', error);
+    res.status(500).json({ success: false, error: 'Login failed' });
+  }
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ success: false, error: 'Internal server error' });
 });
 
-// 404 handler
+// 404 handler - serve homepage for non-API routes, JSON for API routes
 app.use((req, res) => {
-  res.status(404).json({ success: false, error: 'Endpoint not found' });
+  if (req.path.startsWith('/api/')) {
+    return res.status(404).json({ success: false, error: 'Endpoint not found' });
+  }
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 server.listen(PORT, () => {
