@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Private keys - NEVER commit
+*.pem
+*.key
+
+# Environment variables
+.env
+.env.local
+.env.production
+.env.staging
+
+# Build outputs
+build/
+dist/
+*/build/
+*/dist/
+
+# Logs
+logs/
+*.log
+access.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Capacitor native builds
+mobile/android/
+mobile/ios/
+
+# PM2
+ecosystem.config.js
+
+# Coverage
+coverage/
+
+# Temp
+tmp/
+temp/

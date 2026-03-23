@@ -1,0 +1,54 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Backend: Start",
+      "type": "shell",
+      "command": "npm start",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Backend: Dev",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "group": "build",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Admin: Start",
+      "type": "shell",
+      "command": "npm start",
+      "options": { "cwd": "${workspaceFolder}/admin" },
+      "group": "build",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Mobile: Start",
+      "type": "shell",
+      "command": "npm start",
+      "options": { "cwd": "${workspaceFolder}/mobile" },
+      "group": "build",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Install All Dependencies",
+      "type": "shell",
+      "command": "cd backend && npm install && cd ../admin && npm install && cd ../mobile && npm install",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Deploy to EC2",
+      "type": "shell",
+      "command": "ssh -i talktrue.pem ubuntu@ec2-3-1-66-68.ap-southeast-1.compute.amazonaws.com 'cd /var/www/ysecurity && git pull && cd backend && npm install && pm2 restart ysecurity'",
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}
