@@ -1,7 +1,7 @@
-# sercret-security
+# ysecurity-app
 
 ## Overview
-Sercret-Security is a comprehensive device tracking and security system designed for anti-theft protection. The system consists of a mobile app (device-side) and a backend server that work together to provide location tracking, device management, and security features.
+ysecurity-app is a comprehensive device tracking and security system designed for anti-theft protection. The system consists of a mobile app (device-side) and a backend server that work together to provide location tracking, device management, and security features.
 
 **Important Note on Activation:** The system is installed in a dormant state and does not activate tracking or any security features upon installation. Activation only occurs after a user reports the device as lost/stolen, provides verification information, and the security team manually verifies and confirms the report. Only then is the device marked as lost, and the system activates to begin tracking and security measures.
 

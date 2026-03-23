@@ -1,6 +1,6 @@
-# AWS Infrastructure Setup for sercret-security
+# AWS Infrastructure Setup for ysecurity-app
 
-This directory contains the infrastructure-as-code and deployment scripts for setting up sercret-security on AWS.
+This directory contains the infrastructure-as-code and deployment scripts for setting up ysecurity-app on AWS.
 
 ## Overview
 
@@ -13,7 +13,7 @@ The infrastructure consists of:
 ## Prerequisites
 
 1. AWS Account with appropriate permissions
-2. Domain name (sercret-security.com)
+2. Domain name (ysecurity-app.com)
 3. Cloudflare account
 4. GitHub repository with application code
 
@@ -24,7 +24,7 @@ The infrastructure consists of:
 ```bash
 # Deploy the CloudFormation stack
 aws cloudformation create-stack \
-  --stack-name sercret-security-stack \
+  --stack-name ysecurity-app-stack \
   --template-body file://infrastructure/cloudformation.yaml \
   --parameters ParameterKey=KeyName,ParameterValue=your-key-pair \
   --capabilities CAPABILITY_IAM
@@ -75,8 +75,8 @@ JWT_SECRET=your-super-secure-jwt-secret
 STRIPE_SECRET_KEY=your-stripe-secret-key
 EMAIL_USER=your-email@gmail.com
 EMAIL_PASS=your-email-app-password
-CORS_ORIGIN=https://sercret-security.com
-API_BASE_URL=https://api.sercret-security.com
+CORS_ORIGIN=https://ysecurity-app.com
+API_BASE_URL=https://api.ysecurity-app.com
 LOG_LEVEL=info
 ```
 
@@ -115,7 +115,7 @@ For production scaling:
 
 1. **Database Connection**: Check security groups and connection string
 2. **SSL Issues**: Ensure Cloudflare SSL is properly configured
-3. **Application Not Starting**: Check PM2 logs with `pm2 logs sercret-security`
+3. **Application Not Starting**: Check PM2 logs with `pm2 logs ysecurity-app`
 
 ### Useful Commands
 
@@ -124,10 +124,10 @@ For production scaling:
 pm2 status
 
 # View application logs
-pm2 logs sercret-security
+pm2 logs ysecurity-app
 
 # Restart application
-pm2 restart sercret-security
+pm2 restart ysecurity-app
 
 # Check nginx status
 sudo systemctl status nginx

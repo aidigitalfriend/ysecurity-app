@@ -1,7 +1,7 @@
 {
-  "name": "sercret-security-admin",
+  "name": "ysecurity-app-admin",
   "version": "1.0.0",
-  "description": "Modern admin dashboard for sercret-security",
+  "description": "Modern admin dashboard for ysecurity-app",
   "main": "index.js",
   "scripts": {
     "start": "react-scripts start",

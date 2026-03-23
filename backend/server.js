@@ -37,7 +37,7 @@ const logger = winston.createLogger({
     winston.format.errors({ stack: true }),
     winston.format.json()
   ),
-  defaultMeta: { service: 'sercret-security-backend' },
+  defaultMeta: { service: 'ysecurity-app-backend' },
   transports: [
     new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
     new winston.transports.File({ filename: 'logs/combined.log' }),
@@ -112,7 +112,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
 
         // Update member payment status
         const result = await pool.query(
-          'SELECT member_id, email, password_plain, payment_status FROM members WHERE stripe_session_id = $1',
+          'SELECT member_id, email, payment_status FROM members WHERE stripe_session_id = $1',
           [session.id]
         );
 
@@ -123,24 +123,29 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             ['completed', session.payment_intent, session.id]
           );
 
-          // Send credentials email
+          // Send Member ID email
           try {
             const mailOptions = {
               from: process.env.EMAIL_USER,
               to: member.email,
-              subject: 'Your Ysecurity Member ID & Password',
+              subject: 'Your Ysecurity Member ID',
               html: `
                 <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px;">
                   <h2 style="color:#1a73e8;">🛡️ Welcome to Ysecurity!</h2>
-                  <p>Your membership is now active. Here are your credentials:</p>
-                  <div style="background:#f8f9fa;padding:20px;border-radius:8px;margin:20px 0;">
-                    <p style="margin:0 0 8px;"><strong>Member ID:</strong></p>
-                    <p style="font-size:1.4rem;font-weight:bold;color:#1a73e8;margin:0 0 16px;font-family:monospace;">${member.member_id}</p>
-                    <p style="margin:0 0 8px;"><strong>Password:</strong></p>
-                    <p style="font-size:1.4rem;font-weight:bold;color:#1a73e8;margin:0;font-family:monospace;">${member.password_plain}</p>
+                  <p>Your membership is now active. Here is your Member ID:</p>
+                  <div style="background:#f8f9fa;padding:20px;border-radius:8px;margin:20px 0;text-align:center;">
+                    <p style="margin:0 0 8px;font-size:0.9rem;color:#5f6368;"><strong>Your Member ID</strong></p>
+                    <p style="font-size:2rem;font-weight:bold;color:#1a73e8;margin:0;font-family:monospace;letter-spacing:2px;">${member.member_id}</p>
                   </div>
-                  <p style="color:#ea4335;"><strong>⚠️ Important:</strong> Save these credentials securely!</p>
-                  <p style="color:#5f6368;font-size:0.9rem;">Use your Member ID and password to install and activate the Ysecurity app.</p>
+                  <p style="color:#ea4335;"><strong>⚠️ Important:</strong> Save your Member ID securely! It cannot be recovered if lost.</p>
+                  <div style="background:#f8f9fa;border-radius:8px;padding:16px;margin:20px 0;">
+                    <p style="margin:0 0 8px;font-weight:600;">📲 Next Steps:</p>
+                    <ol style="margin:0;padding-left:20px;color:#555;line-height:1.8;">
+                      <li>Download the <strong>Ysecurity</strong> app on your device</li>
+                      <li>Open the app and enter your <strong>Member ID</strong></li>
+                      <li>Protection installs and stays dormant until needed</li>
+                    </ol>
+                  </div>
                   <hr style="border:none;border-top:1px solid #e8eaed;margin:24px 0;">
                   <p style="color:#5f6368;font-size:0.8rem;">Ysecurity - Smart Device Security<br>https://ysecurity.app</p>
                 </div>
@@ -148,7 +153,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             };
             transporter.sendMail(mailOptions);
           } catch (emailErr) {
-            logger.error('Webhook: Failed to send credentials email:', emailErr);
+            logger.error('Webhook: Failed to send Member ID email:', emailErr);
           }
 
           logger.info(`Member ${member.member_id} payment completed via webhook`);
@@ -308,8 +313,8 @@ async function initializeDatabase() {
         id SERIAL PRIMARY KEY,
         member_id TEXT UNIQUE NOT NULL,
         email TEXT UNIQUE NOT NULL,
-        name TEXT NOT NULL,
-        password_hash TEXT NOT NULL,
+        name TEXT,
+        password_hash TEXT,
         password_plain TEXT,
         stripe_session_id TEXT UNIQUE,
         stripe_payment_id TEXT,
@@ -317,6 +322,10 @@ async function initializeDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    // Make name and password_hash nullable (no longer required)
+    await pool.query(`ALTER TABLE members ALTER COLUMN name DROP NOT NULL`).catch(() => {});
+    await pool.query(`ALTER TABLE members ALTER COLUMN password_hash DROP NOT NULL`).catch(() => {});
 
     // Create admins table
     await pool.query(`
@@ -451,15 +460,14 @@ app.post('/api/devices/register', [
   body('model').isLength({ min: 1, max: 100 }).withMessage('Model is required'),
   body('os').isLength({ min: 1, max: 100 }).withMessage('OS is required'),
   body('memberId').matches(/^YS-\d{6}$/).withMessage('Valid Member ID required (format: YS-XXXXXX)'),
-  body('password').isLength({ min: 8 }).withMessage('Password required'),
   handleValidationErrors
 ], async (req, res) => {
-  const { deviceId, model, os, memberId, password } = req.body;
+  const { deviceId, model, os, memberId } = req.body;
 
   try {
     // Verify member exists and payment is completed
     const member = await pool.query(
-      'SELECT id, member_id, password_hash, payment_status FROM members WHERE member_id = $1',
+      'SELECT id, member_id, payment_status FROM members WHERE member_id = $1',
       [memberId]
     );
     if (member.rows.length === 0) {
@@ -467,9 +475,6 @@ app.post('/api/devices/register', [
     }
     if (member.rows[0].payment_status !== 'completed') {
       return res.status(403).json({ success: false, error: 'Membership payment not completed' });
-    }
-    if (!bcrypt.compareSync(password, member.rows[0].password_hash)) {
-      return res.status(401).json({ success: false, error: 'Invalid password' });
     }
 
     // Check if this member already has a device registered
@@ -912,13 +917,53 @@ function generatePassword() {
   return password;
 }
 
-// Create Stripe checkout session for membership
-app.post('/api/members/create-checkout', [
+// ========================================
+// DEV/TEST: Create member without payment (REMOVE BEFORE LAUNCH)
+// ========================================
+app.post('/api/dev/create-member', [
   body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
-  body('name').isLength({ min: 2, max: 100 }).trim().escape().withMessage('Name is required'),
   handleValidationErrors
 ], async (req, res) => {
-  const { email, name } = req.body;
+  const { email } = req.body;
+  try {
+    const existing = await pool.query(
+      'SELECT member_id FROM members WHERE email = $1 AND payment_status = $2',
+      [email, 'completed']
+    );
+    if (existing.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email already has a membership: ' + existing.rows[0].member_id
+      });
+    }
+
+    let memberId;
+    let isUnique = false;
+    while (!isUnique) {
+      memberId = generateMemberId();
+      const check = await pool.query('SELECT id FROM members WHERE member_id = $1', [memberId]);
+      if (check.rows.length === 0) isUnique = true;
+    }
+
+    await pool.query(
+      'INSERT INTO members (member_id, email, payment_status) VALUES ($1, $2, $3) ON CONFLICT (email) DO UPDATE SET member_id = $1, payment_status = $3',
+      [memberId, email, 'completed']
+    );
+
+    logger.info(`[DEV] Test member created: ${memberId} for ${email}`);
+    res.json({ success: true, memberId, email });
+  } catch (error) {
+    logger.error('[DEV] Create member error:', error);
+    res.status(500).json({ success: false, error: 'Failed to create test member' });
+  }
+});
+
+// Create Stripe checkout session for membership (PRODUCTION)
+app.post('/api/members/create-checkout', [
+  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+  handleValidationErrors
+], async (req, res) => {
+  const { email } = req.body;
 
   try {
     // Check if email already has a completed membership
@@ -929,7 +974,7 @@ app.post('/api/members/create-checkout', [
     if (existing.rows.length > 0) {
       return res.status(400).json({
         success: false,
-        error: 'This email already has an active membership (Member ID: ' + existing.rows[0].member_id + '). Check your email for your credentials.'
+        error: 'This email already has an active membership (Member ID: ' + existing.rows[0].member_id + '). Check your email for your Member ID.'
       });
     }
 
@@ -941,10 +986,6 @@ app.post('/api/members/create-checkout', [
       const check = await pool.query('SELECT id FROM members WHERE member_id = $1', [memberId]);
       if (check.rows.length === 0) isUnique = true;
     }
-
-    // Generate password
-    const password = generatePassword();
-    const passwordHash = bcrypt.hashSync(password, 12);
 
     // Create Stripe checkout session
     const session = await stripe.checkout.sessions.create({
@@ -958,15 +999,14 @@ app.post('/api/members/create-checkout', [
       success_url: `${process.env.API_BASE_URL || 'https://ysecurity.app'}/payment.html?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.API_BASE_URL || 'https://ysecurity.app'}/payment.html`,
       metadata: {
-        memberId: memberId,
-        memberName: name
+        memberId: memberId
       }
     });
 
-    // Save pending member record
+    // Save pending member record (no password needed)
     await pool.query(
-      'INSERT INTO members (member_id, email, name, password_hash, password_plain, stripe_session_id, payment_status) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (email) DO UPDATE SET member_id = $1, name = $3, password_hash = $4, password_plain = $5, stripe_session_id = $6, payment_status = $7',
-      [memberId, email, name, passwordHash, password, session.id, 'pending']
+      'INSERT INTO members (member_id, email, stripe_session_id, payment_status) VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO UPDATE SET member_id = $1, stripe_session_id = $3, payment_status = $4',
+      [memberId, email, session.id, 'pending']
     );
 
     logger.info(`Checkout session created for ${email}, member ID: ${memberId}`);
@@ -977,7 +1017,7 @@ app.post('/api/members/create-checkout', [
   }
 });
 
-// Verify payment and return member credentials
+// Verify payment and return member ID
 app.get('/api/members/verify-payment', async (req, res) => {
   const sessionId = req.query.session_id;
 
@@ -995,7 +1035,7 @@ app.get('/api/members/verify-payment', async (req, res) => {
 
     // Find member by stripe session ID
     const result = await pool.query(
-      'SELECT member_id, email, password_plain, payment_status FROM members WHERE stripe_session_id = $1',
+      'SELECT member_id, email, payment_status FROM members WHERE stripe_session_id = $1',
       [sessionId]
     );
 
@@ -1012,24 +1052,29 @@ app.get('/api/members/verify-payment', async (req, res) => {
         ['completed', session.payment_intent, sessionId]
       );
 
-      // Send credentials email
+      // Send Member ID email
       try {
         const mailOptions = {
           from: process.env.EMAIL_USER,
           to: member.email,
-          subject: 'Your Ysecurity Member ID & Password',
+          subject: 'Your Ysecurity Member ID',
           html: `
             <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px;">
               <h2 style="color:#1a73e8;">🛡️ Welcome to Ysecurity!</h2>
-              <p>Your membership is now active. Here are your credentials:</p>
-              <div style="background:#f8f9fa;padding:20px;border-radius:8px;margin:20px 0;">
-                <p style="margin:0 0 8px;"><strong>Member ID:</strong></p>
-                <p style="font-size:1.4rem;font-weight:bold;color:#1a73e8;margin:0 0 16px;font-family:monospace;">${member.member_id}</p>
-                <p style="margin:0 0 8px;"><strong>Password:</strong></p>
-                <p style="font-size:1.4rem;font-weight:bold;color:#1a73e8;margin:0;font-family:monospace;">${member.password_plain}</p>
+              <p>Your membership is now active. Here is your Member ID:</p>
+              <div style="background:#f8f9fa;padding:20px;border-radius:8px;margin:20px 0;text-align:center;">
+                <p style="margin:0 0 8px;font-size:0.9rem;color:#5f6368;"><strong>Your Member ID</strong></p>
+                <p style="font-size:2rem;font-weight:bold;color:#1a73e8;margin:0;font-family:monospace;letter-spacing:2px;">${member.member_id}</p>
               </div>
-              <p style="color:#ea4335;"><strong>⚠️ Important:</strong> Save these credentials securely! Your password is needed to recover your device if lost.</p>
-              <p style="color:#5f6368;font-size:0.9rem;">Use your Member ID and password to install and activate the Ysecurity app on your tablet or mobile device.</p>
+              <p style="color:#ea4335;"><strong>⚠️ Important:</strong> Save your Member ID securely! It cannot be recovered if lost.</p>
+              <div style="background:#f8f9fa;border-radius:8px;padding:16px;margin:20px 0;">
+                <p style="margin:0 0 8px;font-weight:600;">📲 Next Steps:</p>
+                <ol style="margin:0;padding-left:20px;color:#555;line-height:1.8;">
+                  <li>Download the <strong>Ysecurity</strong> app on your device</li>
+                  <li>Open the app and enter your <strong>Member ID</strong></li>
+                  <li>Protection installs and stays dormant until needed</li>
+                </ol>
+              </div>
               <hr style="border:none;border-top:1px solid #e8eaed;margin:24px 0;">
               <p style="color:#5f6368;font-size:0.8rem;">Ysecurity - Smart Device Security<br>https://ysecurity.app</p>
             </div>
@@ -1037,65 +1082,18 @@ app.get('/api/members/verify-payment', async (req, res) => {
         };
         transporter.sendMail(mailOptions);
       } catch (emailErr) {
-        logger.error('Failed to send credentials email:', emailErr);
+        logger.error('Failed to send Member ID email:', emailErr);
       }
     }
 
     res.json({
       success: true,
       memberId: member.member_id,
-      password: member.password_plain,
       email: member.email
     });
   } catch (error) {
     logger.error('Payment verification error:', error);
     res.status(500).json({ success: false, error: 'Payment verification failed' });
-  }
-});
-
-// Member login (for app authentication)
-app.post('/api/members/login', [
-  body('memberId').matches(/^YS-\d{6}$/).withMessage('Invalid Member ID format'),
-  body('password').isLength({ min: 8 }).withMessage('Password required'),
-  handleValidationErrors
-], async (req, res) => {
-  const { memberId, password } = req.body;
-
-  try {
-    const result = await pool.query(
-      'SELECT id, member_id, email, name, password_hash, payment_status FROM members WHERE member_id = $1',
-      [memberId]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(401).json({ success: false, error: 'Invalid Member ID or password' });
-    }
-
-    const member = result.rows[0];
-
-    if (member.payment_status !== 'completed') {
-      return res.status(403).json({ success: false, error: 'Membership payment not completed' });
-    }
-
-    if (!bcrypt.compareSync(password, member.password_hash)) {
-      return res.status(401).json({ success: false, error: 'Invalid Member ID or password' });
-    }
-
-    const token = jwt.sign(
-      { id: member.id, memberId: member.member_id, email: member.email, role: 'member' },
-      process.env.JWT_SECRET,
-      { expiresIn: '30d' }
-    );
-
-    logger.info(`Member ${memberId} logged in`);
-    res.json({
-      success: true,
-      token,
-      member: { memberId: member.member_id, email: member.email, name: member.name }
-    });
-  } catch (error) {
-    logger.error('Member login error:', error);
-    res.status(500).json({ success: false, error: 'Login failed' });
   }
 });
 

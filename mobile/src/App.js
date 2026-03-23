@@ -1,16 +1,49 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { Capacitor } from '@capacitor/core';
-import { Device } from '@capacitor/device';
-import { BackgroundGeolocation, LocationAccuracy } from '@capacitor/background-geolocation';
-import { Network } from '@capacitor/network';
-import { Camera, CameraResultType } from '@capacitor/camera';
-import { Geolocation } from '@capacitor/geolocation';
-import { Storage } from '@capacitor/storage';
-import io from 'socket.io-client';
+import React, { useEffect, useState, useRef } from 'react';
 
 const API_BASE = process.env.REACT_APP_API_BASE_URL || 'https://ysecurity.app/api';
 
-// App screens
+// Detect if running in native Capacitor
+let isNative = false;
+let Device, Storage, Network, Camera, BackgroundGeolocation, Capacitor;
+try {
+  Capacitor = require('@capacitor/core').Capacitor;
+  isNative = Capacitor.isNativePlatform();
+  if (isNative) {
+    Device = require('@capacitor/device').Device;
+    Storage = require('@capacitor/storage').Storage;
+    Network = require('@capacitor/network').Network;
+    Camera = require('@capacitor/camera').Camera;
+    BackgroundGeolocation = require('@capacitor/background-geolocation').BackgroundGeolocation;
+  }
+} catch (e) {
+  isNative = false;
+}
+
+// Web-safe storage helpers
+const store = {
+  get: async (key) => {
+    if (isNative && Storage) {
+      const r = await Storage.get({ key });
+      return r.value;
+    }
+    return localStorage.getItem(key);
+  },
+  set: async (key, value) => {
+    if (isNative && Storage) {
+      await Storage.set({ key, value });
+    } else {
+      localStorage.setItem(key, value);
+    }
+  },
+  remove: async (key) => {
+    if (isNative && Storage) {
+      await Storage.remove({ key });
+    } else {
+      localStorage.removeItem(key);
+    }
+  },
+};
+
 const SCREEN = {
   LOADING: 'loading',
   LOGIN: 'login',
@@ -29,7 +62,6 @@ function App() {
 
   // Login form
   const [memberId, setMemberId] = useState('');
-  const [password, setPassword] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // Tracking state
@@ -57,23 +89,36 @@ function App() {
 
   const initializeApp = async () => {
     try {
-      // Get device info
-      const info = await Device.getInfo();
-      const id = info.uuid || info.identifierForVendor || `web-${Date.now()}`;
+      let id, info;
+
+      if (isNative && Device) {
+        info = await Device.getInfo();
+        id = info.uuid || info.identifierForVendor || `dev-${Date.now()}`;
+      } else {
+        // Web: generate persistent device ID
+        id = localStorage.getItem('ys_device_id');
+        if (!id) {
+          id = 'web-' + Date.now() + '-' + Math.random().toString(36).substring(2, 10);
+          localStorage.setItem('ys_device_id', id);
+        }
+        const ua = navigator.userAgent;
+        info = {
+          model: ua.includes('iPhone') ? 'iPhone' : ua.includes('Android') ? 'Android' : 'Device',
+          operatingSystem: navigator.platform || 'Web',
+          osVersion: '',
+        };
+      }
+
       setDeviceId(id);
       setDeviceInfo(info);
 
       // Check if already registered
-      const cached = await Storage.get({ key: 'registration' });
-      if (cached.value) {
-        const registration = JSON.parse(cached.value);
+      const cached = await store.get('registration');
+      if (cached) {
+        const registration = JSON.parse(cached);
         setIsRegistered(true);
         setMemberId(registration.memberId);
 
-        // Load cached tracking data
-        await loadCachedData();
-
-        // Start monitoring
         initSocket(id);
         startStatusChecks(id);
         setScreen(SCREEN.INSTALLED);
@@ -108,10 +153,6 @@ function App() {
       setError('Invalid Member ID format. Must be YS-XXXXXX (e.g., YS-123456)');
       return;
     }
-    if (password.length < 8) {
-      setError('Password must be at least 8 characters');
-      return;
-    }
 
     setIsLoggingIn(true);
 
@@ -127,7 +168,6 @@ function App() {
           model: info.model || 'Unknown',
           os: `${info.operatingSystem || 'Unknown'} ${info.osVersion || ''}`.trim(),
           memberId: memberIdTrimmed,
-          password: password,
         })
       });
 
@@ -512,14 +552,6 @@ function App() {
             autoCapitalize="characters"
           />
 
-          <input
-            style={styles.input}
-            type="password"
-            placeholder="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-
           <button
             style={{
               ...styles.button,
@@ -532,9 +564,16 @@ function App() {
             {isLoggingIn ? 'Verifying...' : 'Install Protection'}
           </button>
 
-          <p style={{ textAlign: 'center', fontSize: '12px', opacity: 0.5, marginTop: '20px' }}>
-            Don't have a Member ID?<br />
-            Visit <strong>ysecurity.app</strong> to get one.
+          <p style={{ textAlign: 'center', fontSize: '13px', marginTop: '24px' }}>
+            <span style={{ opacity: 0.5 }}>Don't have a Member ID?</span><br />
+            <a
+              href="https://ysecurity.app/payment.html"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: '#42a5f5', textDecoration: 'underline', fontWeight: '600' }}
+            >
+              Purchase Membership ($20)
+            </a>
           </p>
         </div>
       </div>

@@ -1,7 +1,7 @@
 {
-  "name": "sercret-security-backend",
+  "name": "ysecurity-app-backend",
   "version": "1.0.0",
-  "description": "Backend for sercret-security device tracking system",
+  "description": "Backend for ysecurity-app device tracking system",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

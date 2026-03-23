@@ -34,19 +34,16 @@
   <div class="payment-box">
     <h2>🛡️ Create Membership</h2>
     <div class="alert alert-info">
-      <strong>What you'll get:</strong> A unique Member ID and password to install the app and recover your device if lost.
+      <strong>What you'll get:</strong> A unique Member ID to install the app and protect your device.
     </div>
 
     <div id="error-msg" class="alert alert-error" style="display:none;"></div>
 
-    <form id="payment-form" onsubmit="handlePayment(event)">
+    <form id="payment-form">
       <div class="form-group">
         <label for="email">Email Address</label>
         <input type="email" id="email" name="email" required placeholder="you@example.com" autocomplete="email">
-      </div>
-      <div class="form-group">
-        <label for="name">Full Name</label>
-        <input type="text" id="name" name="name" required placeholder="Your full name" minlength="2" maxlength="100" autocomplete="name">
+        <small style="color:var(--gray);font-size:0.8rem;">Your Member ID will be sent to this email</small>
       </div>
 
       <div style="background:var(--bg);padding:16px;border-radius:8px;margin-bottom:20px;">
@@ -57,14 +54,11 @@
         <div style="font-size:0.85rem;color:var(--gray);margin-top:4px;">One-time payment • No subscription</div>
       </div>
 
-      <div class="form-group">
-        <label>
-          <input type="checkbox" id="agree-terms" required>
-          I agree to the <a href="/terms.html" target="_blank">Terms of Service</a> and <a href="/privacy.html" target="_blank">Privacy Policy</a>
-        </label>
-      </div>
+      <p style="font-size:0.8rem;color:var(--gray);margin-bottom:16px;">
+        By proceeding, you agree to the <a href="/terms.html" target="_blank">Terms of Service</a> and <a href="/privacy.html" target="_blank">Privacy Policy</a>.
+      </p>
 
-      <button type="submit" id="pay-btn" class="btn btn-primary btn-lg" style="width:100%;">
+      <button type="submit" id="pay-btn" class="btn btn-primary btn-lg" style="width:100%;-webkit-appearance:none;touch-action:manipulation;">
         Pay $20 &amp; Get Member ID
       </button>
     </form>
@@ -84,12 +78,8 @@
 
     <div class="member-credentials">
       <div class="field">
-        <div class="field-label">Member ID</div>
-        <div class="field-value" id="member-id-display">—</div>
-      </div>
-      <div class="field">
-        <div class="field-label">Password</div>
-        <div class="field-value" id="member-password-display">—</div>
+        <div class="field-label">Your Member ID</div>
+        <div class="field-value" id="member-id-display" style="font-size:1.6rem;letter-spacing:2px;">—</div>
       </div>
       <div class="field">
         <div class="field-label">Email</div>
@@ -98,21 +88,21 @@
     </div>
 
     <div class="alert alert-info">
-      <strong>⚠️ CRITICAL — NO RECOVERY:</strong> Your Member ID and password are <strong>one-time use</strong> and <strong>cannot be recovered</strong> if lost. If you lose them, you will need to purchase a new membership. Save them now!
+      <strong>⚠️ IMPORTANT:</strong> Your Member ID <strong>cannot be recovered</strong> if lost. Save it now! It has also been sent to your email.
     </div>
 
     <div style="background:#f8f9fa;border-radius:12px;padding:20px;margin:20px 0;">
       <h3 style="margin:0 0 12px;font-size:1rem;">📲 What to do next:</h3>
       <ol style="margin:0;padding-left:20px;font-size:0.9rem;color:#555;line-height:1.8;">
-        <li>Download the <strong>Ysecurity</strong> app on your tablet or mobile device</li>
-        <li>Open the app and enter your <strong>Member ID</strong> and <strong>Password</strong></li>
+        <li>Download the <strong>Ysecurity</strong> app on your device</li>
+        <li>Open the app and enter your <strong>Member ID</strong></li>
         <li>The app will install silently and stay <strong>dormant</strong> until activated</li>
         <li>If your device is lost, contact our security team to <strong>activate tracking</strong></li>
       </ol>
     </div>
 
     <p style="color:var(--gray);font-size:0.9rem;margin-bottom:20px;">
-      These credentials have also been sent to your email.
+      Your Member ID has also been sent to your email.
     </p>
 
     <a href="/" class="btn btn-primary" style="width:100%;">Back to Home</a>
@@ -159,17 +149,21 @@
     verifyPayment(sessionId);
   }
 
-  async function handlePayment(e) {
+  // Attach form handler (Safari-safe - no inline onsubmit)
+  document.getElementById('payment-form').addEventListener('submit', function(e) {
     e.preventDefault();
+    handlePayment();
+  });
+
+  async function handlePayment() {
     const btn = document.getElementById('pay-btn');
     const errorMsg = document.getElementById('error-msg');
     errorMsg.style.display = 'none';
 
     const email = document.getElementById('email').value.trim();
-    const name = document.getElementById('name').value.trim();
 
-    if (!email || !name) {
-      errorMsg.textContent = 'Please fill in all fields.';
+    if (!email) {
+      errorMsg.textContent = 'Please enter your email address.';
       errorMsg.style.display = 'block';
       return;
     }
@@ -181,7 +175,7 @@
       const response = await fetch('/api/members/create-checkout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, name })
+        body: JSON.stringify({ email })
       });
 
       const data = await response.json();
@@ -212,7 +206,6 @@
 
       if (data.success) {
         document.getElementById('member-id-display').textContent = data.memberId;
-        document.getElementById('member-password-display').textContent = data.password;
         document.getElementById('member-email-display').textContent = data.email;
         document.getElementById('success-section').style.display = 'block';
       } else {

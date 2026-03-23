@@ -4,7 +4,7 @@ Description: 'Sercret Security Infrastructure - EC2 + RDS PostgreSQL'
 Parameters:
   EnvironmentName:
     Type: String
-    Default: 'sercret-security-prod'
+    Default: 'ysecurity-app-prod'
     Description: 'Environment name for tagging'
 
   InstanceType:
@@ -220,8 +220,8 @@ Resources:
 
           # Clone repository
           cd /home/ec2-user
-          git clone https://github.com/chicksbird/sercret-security.git
-          cd sercret-security/backend
+          git clone https://github.com/chicksbird/ysecurity-app.git
+          cd ysecurity-app/backend
 
           # Install dependencies
           npm install
@@ -244,7 +244,7 @@ Resources:
           EOF
 
           # Start application with PM2
-          pm2 start server.js --name sercret-security
+          pm2 start server.js --name ysecurity-app
           pm2 startup
           pm2 save
 

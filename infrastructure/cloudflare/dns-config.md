@@ -1,7 +1,7 @@
-# Cloudflare Configuration for sercret-security.com
+# Cloudflare Configuration for ysecurity-app.com
 # This file contains the DNS records and configuration for Cloudflare setup
 
-# DNS Records for sercret-security.com
+# DNS Records for ysecurity-app.com
 # Replace YOUR_SERVER_IP with your actual EC2 instance public IP
 
 # A Record for root domain
@@ -39,17 +39,17 @@
 # - Minimum TLS Version: 1.2
 
 # Page Rules (Legacy - consider using Rules instead)
-# 1. URL: https://sercret-security.com/*
+# 1. URL: https://ysecurity-app.com/*
 #    Setting: Always Use HTTPS
 #    Setting: Security Level: Medium
 #    Setting: Cache Level: Standard
 
-# 2. URL: https://api.sercret-security.com/*
+# 2. URL: https://api.ysecurity-app.com/*
 #    Setting: Always Use HTTPS
 #    Setting: Security Level: High
 #    Setting: Cache Level: Bypass
 
-# 3. URL: https://admin.sercret-security.com/*
+# 3. URL: https://admin.ysecurity-app.com/*
 #    Setting: Always Use HTTPS
 #    Setting: Security Level: High
 #    Setting: Cache Level: Bypass
@@ -64,7 +64,7 @@
 # Rule 1: Redirect HTTP to HTTPS
 # Expression: (http.request.uri.path ~ ".*")
 # Action: Redirect
-# URL: https://sercret-security.com${uri}
+# URL: https://ysecurity-app.com${uri}
 
 # Rule 2: API Security
 # Expression: (http.request.uri.path contains "/api/")
