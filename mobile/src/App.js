@@ -7,12 +7,20 @@ import Services from './pages/Services';
 import Privacy from './pages/Privacy';
 import Terms from './pages/Terms';
 import DeviceApp from './pages/DeviceApp';
+import SignUp from './pages/SignUp';
+import SignIn from './pages/SignIn';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
 
 function App() {
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Landing />} />
+        <Route path="/signup" element={<SignUp />} />
+        <Route path="/signin" element={<SignIn />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
         <Route path="/payment" element={<Payment />} />
         <Route path="/payment.html" element={<Payment />} />
         <Route path="/services" element={<Services />} />

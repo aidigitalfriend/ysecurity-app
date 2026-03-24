@@ -10,7 +10,7 @@ export default function Landing() {
         <h1>Protect Your Device.<br/>Recover What's Yours.</h1>
         <p>Ysecurity turns your tablet or mobile device into a smart-secured asset with real-time GPS tracking, remote alarm, camera capture, and instant recovery tools.</p>
         <div className="hero-buttons">
-          <Link to="/payment" className="btn btn-lg" style={{background:'#fff',color:'#1a73e8'}}>Get Member ID — $20</Link>
+          <Link to="/signup" className="btn btn-lg" style={{background:'#fff',color:'#1a73e8'}}>Get Started — $20</Link>
           <Link to="/app" className="btn btn-lg" style={{background:'#4caf50',color:'#fff'}}>📱 Open App</Link>
           <Link to="/services" className="btn btn-lg btn-outline" style={{borderColor:'#fff',color:'#fff'}}>Learn More</Link>
         </div>

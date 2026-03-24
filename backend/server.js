@@ -327,6 +327,18 @@ async function initializeDatabase() {
     await pool.query(`ALTER TABLE members ALTER COLUMN name DROP NOT NULL`).catch(() => {});
     await pool.query(`ALTER TABLE members ALTER COLUMN password_hash DROP NOT NULL`).catch(() => {});
 
+    // Create password_reset_tokens table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        id SERIAL PRIMARY KEY,
+        email TEXT NOT NULL,
+        token TEXT UNIQUE NOT NULL,
+        expires_at TIMESTAMP NOT NULL,
+        used BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     // Create admins table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS admins (
@@ -917,6 +929,182 @@ function generatePassword() {
   return password;
 }
 
+// Member JWT auth middleware
+const authenticateMember = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ success: false, error: 'Access token required' });
+  jwt.verify(token, process.env.JWT_SECRET, (err, member) => {
+    if (err) return res.status(403).json({ success: false, error: 'Invalid or expired token' });
+    req.member = member;
+    next();
+  });
+};
+
+// ========================================
+// AUTH: Sign Up, Sign In, Forgot/Reset Password
+// ========================================
+
+// Sign Up
+app.post('/api/auth/signup', [
+  body('name').trim().isLength({ min: 2, max: 100 }).withMessage('Name must be 2-100 characters'),
+  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  handleValidationErrors
+], async (req, res) => {
+  const { name, email, password } = req.body;
+  try {
+    const existing = await pool.query('SELECT id FROM members WHERE email = $1', [email]);
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ success: false, error: 'An account with this email already exists. Please sign in.' });
+    }
+
+    let memberId;
+    let isUnique = false;
+    while (!isUnique) {
+      memberId = generateMemberId();
+      const check = await pool.query('SELECT id FROM members WHERE member_id = $1', [memberId]);
+      if (check.rows.length === 0) isUnique = true;
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+    await pool.query(
+      'INSERT INTO members (member_id, name, email, password_hash, payment_status) VALUES ($1, $2, $3, $4, $5)',
+      [memberId, name, email, passwordHash, 'pending']
+    );
+
+    const token = jwt.sign({ id: memberId, email, name, role: 'member' }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    logger.info(`Member signed up: ${email} (${memberId})`);
+    res.json({ success: true, token, member: { memberId, name, email, paymentStatus: 'pending' } });
+  } catch (error) {
+    logger.error('Signup error:', error);
+    res.status(500).json({ success: false, error: 'Signup failed. Please try again.' });
+  }
+});
+
+// Sign In
+app.post('/api/auth/signin', [
+  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+  body('password').isLength({ min: 1 }).withMessage('Password is required'),
+  handleValidationErrors
+], async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const result = await pool.query('SELECT member_id, name, email, password_hash, payment_status FROM members WHERE email = $1', [email]);
+    if (result.rows.length === 0) {
+      return res.status(401).json({ success: false, error: 'Invalid email or password.' });
+    }
+    const member = result.rows[0];
+    if (!member.password_hash) {
+      return res.status(401).json({ success: false, error: 'This account was created before sign-in was available. Please use Forgot Password to set a password.' });
+    }
+    const valid = await bcrypt.compare(password, member.password_hash);
+    if (!valid) {
+      return res.status(401).json({ success: false, error: 'Invalid email or password.' });
+    }
+    const token = jwt.sign({ id: member.member_id, email: member.email, name: member.name, role: 'member' }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    logger.info(`Member signed in: ${email}`);
+    res.json({ success: true, token, member: { memberId: member.member_id, name: member.name, email: member.email, paymentStatus: member.payment_status } });
+  } catch (error) {
+    logger.error('Signin error:', error);
+    res.status(500).json({ success: false, error: 'Sign in failed. Please try again.' });
+  }
+});
+
+// Get current member profile
+app.get('/api/auth/me', authenticateMember, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT member_id, name, email, payment_status FROM members WHERE member_id = $1', [req.member.id]);
+    if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Member not found' });
+    const m = result.rows[0];
+    res.json({ success: true, member: { memberId: m.member_id, name: m.name, email: m.email, paymentStatus: m.payment_status } });
+  } catch (error) {
+    logger.error('Get profile error:', error);
+    res.status(500).json({ success: false, error: 'Failed to get profile' });
+  }
+});
+
+// Forgot Password - send reset link via email
+app.post('/api/auth/forgot-password', [
+  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+  handleValidationErrors
+], async (req, res) => {
+  const { email } = req.body;
+  try {
+    const member = await pool.query('SELECT id FROM members WHERE email = $1', [email]);
+    // Always return success to prevent email enumeration
+    if (member.rows.length === 0) {
+      return res.json({ success: true, message: 'If an account exists with that email, a reset link has been sent.' });
+    }
+
+    // Invalidate old tokens
+    await pool.query('UPDATE password_reset_tokens SET used = TRUE WHERE email = $1 AND used = FALSE', [email]);
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+    await pool.query('INSERT INTO password_reset_tokens (email, token, expires_at) VALUES ($1, $2, $3)', [email, token, expiresAt]);
+
+    const resetUrl = `${process.env.API_BASE_URL || 'https://ysecurity.app'}/reset-password?token=${token}`;
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'Ysecurity - Reset Your Password',
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px;">
+          <h2 style="color:#1a73e8;">🛡️ Ysecurity Password Reset</h2>
+          <p>You requested a password reset. Click the button below to set a new password:</p>
+          <div style="text-align:center;margin:24px 0;">
+            <a href="${resetUrl}" style="background:#1a73e8;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;display:inline-block;">Reset Password</a>
+          </div>
+          <p style="color:#5f6368;font-size:0.85rem;">This link expires in 1 hour. If you didn't request this, ignore this email.</p>
+          <hr style="border:none;border-top:1px solid #e8eaed;margin:24px 0;">
+          <p style="color:#5f6368;font-size:0.8rem;">Ysecurity - Smart Device Security</p>
+        </div>
+      `
+    };
+    transporter.sendMail(mailOptions).catch(err => logger.error('Reset email error:', err));
+
+    logger.info(`Password reset requested for ${email}`);
+    res.json({ success: true, message: 'If an account exists with that email, a reset link has been sent.' });
+  } catch (error) {
+    logger.error('Forgot password error:', error);
+    res.status(500).json({ success: false, error: 'Failed to process request. Please try again.' });
+  }
+});
+
+// Reset Password - verify token and set new password
+app.post('/api/auth/reset-password', [
+  body('token').isLength({ min: 64, max: 64 }).withMessage('Invalid reset token'),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  handleValidationErrors
+], async (req, res) => {
+  const { token, password } = req.body;
+  try {
+    const result = await pool.query(
+      'SELECT email, expires_at FROM password_reset_tokens WHERE token = $1 AND used = FALSE',
+      [token]
+    );
+    if (result.rows.length === 0) {
+      return res.status(400).json({ success: false, error: 'Invalid or expired reset link. Please request a new one.' });
+    }
+    const { email, expires_at } = result.rows[0];
+    if (new Date(expires_at) < new Date()) {
+      await pool.query('UPDATE password_reset_tokens SET used = TRUE WHERE token = $1', [token]);
+      return res.status(400).json({ success: false, error: 'This reset link has expired. Please request a new one.' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+    await pool.query('UPDATE members SET password_hash = $1 WHERE email = $2', [passwordHash, email]);
+    await pool.query('UPDATE password_reset_tokens SET used = TRUE WHERE token = $1', [token]);
+
+    logger.info(`Password reset completed for ${email}`);
+    res.json({ success: true, message: 'Password has been reset. You can now sign in.' });
+  } catch (error) {
+    logger.error('Reset password error:', error);
+    res.status(500).json({ success: false, error: 'Failed to reset password. Please try again.' });
+  }
+});
+
 // ========================================
 // DEV/TEST: Create member without payment (REMOVE BEFORE LAUNCH)
 // ========================================
@@ -959,11 +1147,30 @@ app.post('/api/dev/create-member', [
 });
 
 // Create Stripe checkout session for membership (PRODUCTION)
-app.post('/api/members/create-checkout', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
-  handleValidationErrors
-], async (req, res) => {
-  const { email } = req.body;
+// Accepts either: logged-in user (Bearer token) OR email in body
+app.post('/api/members/create-checkout', async (req, res) => {
+  let email;
+
+  // Check if user is authenticated (signed in)
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      email = decoded.email;
+    } catch (e) {
+      // Token invalid, fall through to email in body
+    }
+  }
+
+  // Fall back to email in body
+  if (!email) {
+    email = req.body && req.body.email;
+  }
+
+  if (!email) {
+    return res.status(400).json({ success: false, error: 'Email is required. Please sign in or provide an email.' });
+  }
 
   try {
     // Check if email already has a completed membership
@@ -978,13 +1185,18 @@ app.post('/api/members/create-checkout', [
       });
     }
 
-    // Generate unique member ID
+    // Check if member already exists (signed up but not paid)
+    const memberRow = await pool.query('SELECT member_id FROM members WHERE email = $1', [email]);
     let memberId;
-    let isUnique = false;
-    while (!isUnique) {
-      memberId = generateMemberId();
-      const check = await pool.query('SELECT id FROM members WHERE member_id = $1', [memberId]);
-      if (check.rows.length === 0) isUnique = true;
+    if (memberRow.rows.length > 0) {
+      memberId = memberRow.rows[0].member_id;
+    } else {
+      let isUnique = false;
+      while (!isUnique) {
+        memberId = generateMemberId();
+        const check = await pool.query('SELECT id FROM members WHERE member_id = $1', [memberId]);
+        if (check.rows.length === 0) isUnique = true;
+      }
     }
 
     // Create Stripe checkout session
@@ -1003,9 +1215,9 @@ app.post('/api/members/create-checkout', [
       }
     });
 
-    // Save pending member record (no password needed)
+    // Update or insert member record with stripe session
     await pool.query(
-      'INSERT INTO members (member_id, email, stripe_session_id, payment_status) VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO UPDATE SET member_id = $1, stripe_session_id = $3, payment_status = $4',
+      'INSERT INTO members (member_id, email, stripe_session_id, payment_status) VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO UPDATE SET stripe_session_id = $3, payment_status = $4',
       [memberId, email, session.id, 'pending']
     );
 

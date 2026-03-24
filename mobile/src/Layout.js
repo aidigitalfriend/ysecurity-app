@@ -1,8 +1,25 @@
-import React, { useState } from 'react';
-import { Link } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 
 export default function Layout({ children }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [member, setMember] = useState(null);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('ys_member');
+      if (stored) setMember(JSON.parse(stored));
+    } catch (e) { /* ignore */ }
+  }, []);
+
+  const handleLogout = () => {
+    localStorage.removeItem('ys_token');
+    localStorage.removeItem('ys_member');
+    setMember(null);
+    setMenuOpen(false);
+    navigate('/');
+  };
 
   return (
     <>
@@ -15,7 +32,17 @@ export default function Layout({ children }) {
             <li><Link to="/services" onClick={() => setMenuOpen(false)}>Services</Link></li>
             <li><Link to="/privacy" onClick={() => setMenuOpen(false)}>Privacy</Link></li>
             <li><Link to="/terms" onClick={() => setMenuOpen(false)}>Terms</Link></li>
-            <li><Link to="/payment" className="btn btn-primary" style={{padding:'8px 20px',fontSize:'0.9rem'}} onClick={() => setMenuOpen(false)}>Get Started</Link></li>
+            {member ? (
+              <>
+                <li><Link to="/payment" onClick={() => setMenuOpen(false)} style={{fontWeight:'600'}}>{member.name || member.email}</Link></li>
+                <li><button onClick={handleLogout} className="btn btn-outline" style={{padding:'8px 16px',fontSize:'0.9rem',cursor:'pointer',border:'1px solid var(--primary)',background:'transparent',color:'var(--primary)',borderRadius:'8px'}}>Logout</button></li>
+              </>
+            ) : (
+              <>
+                <li><Link to="/signin" onClick={() => setMenuOpen(false)} style={{fontWeight:'500'}}>Sign In</Link></li>
+                <li><Link to="/signup" className="btn btn-primary" style={{padding:'8px 20px',fontSize:'0.9rem'}} onClick={() => setMenuOpen(false)}>Sign Up</Link></li>
+              </>
+            )}
           </ul>
         </div>
       </nav>

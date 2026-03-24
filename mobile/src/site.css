@@ -411,6 +411,20 @@ a:hover { text-decoration: underline; }
 .alert-error { background: #fce8e6; color: #c5221f; border: 1px solid #f5c6cb; }
 .alert-info { background: #e8f0fe; color: #1967d2; border: 1px solid #d2e3fc; }
 
+/* Auth pages */
+.auth-container {
+  max-width: 440px;
+  margin: 0 auto;
+  padding: 48px 24px;
+}
+
+.auth-box {
+  background: var(--white);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 40px;
+}
+
 /* Success page */
 .success-container {
   max-width: 500px;

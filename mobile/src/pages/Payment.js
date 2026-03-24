@@ -1,16 +1,29 @@
 import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import Layout from '../Layout';
 
 const API_BASE = process.env.REACT_APP_API_BASE_URL || 'https://ysecurity.app/api';
 
 export default function Payment() {
+  const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(null); // { memberId, email }
+  const [member, setMember] = useState(null);
 
   useEffect(() => {
+    // Check if logged in
+    try {
+      const stored = localStorage.getItem('ys_member');
+      if (stored) {
+        const m = JSON.parse(stored);
+        setMember(m);
+        setEmail(m.email || '');
+      }
+    } catch (e) { /* ignore */ }
+
+    // Check for payment verification
     const params = new URLSearchParams(window.location.search);
     const sessionId = params.get('session_id');
     if (sessionId) {
@@ -24,6 +37,16 @@ export default function Payment() {
       const data = await response.json();
       if (data.success) {
         setSuccess({ memberId: data.memberId, email: data.email });
+        // Update local storage with completed status
+        try {
+          const stored = localStorage.getItem('ys_member');
+          if (stored) {
+            const m = JSON.parse(stored);
+            m.paymentStatus = 'completed';
+            m.memberId = data.memberId;
+            localStorage.setItem('ys_member', JSON.stringify(m));
+          }
+        } catch (e) { /* ignore */ }
       } else {
         setError(data.error || 'Payment verification failed. Contact support if you were charged.');
       }
@@ -43,9 +66,13 @@ export default function Payment() {
 
     setLoading(true);
     try {
+      const headers = { 'Content-Type': 'application/json' };
+      const token = localStorage.getItem('ys_token');
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
       const response = await fetch(`${API_BASE}/members/create-checkout`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ email: email.trim() }),
       });
       const data = await response.json();
@@ -124,6 +151,19 @@ export default function Payment() {
             <strong>What you'll get:</strong> A unique Member ID to install the app and protect your device.
           </div>
 
+          {!member && (
+            <div style={{background:'var(--bg)',padding:'16px',borderRadius:'8px',marginBottom:'20px',textAlign:'center'}}>
+              <p style={{margin:'0 0 8px',fontSize:'0.9rem'}}>Already have an account? <Link to="/signin" style={{fontWeight:'600'}}>Sign In</Link></p>
+              <p style={{margin:0,fontSize:'0.8rem',color:'var(--gray)'}}>Or <Link to="/signup">create a free account</Link> first to track your membership</p>
+            </div>
+          )}
+
+          {member && (
+            <div style={{background:'#e8f5e9',padding:'12px 16px',borderRadius:'8px',marginBottom:'20px',fontSize:'0.9rem'}}>
+              Signed in as <strong>{member.name || member.email}</strong>
+            </div>
+          )}
+
           {error && <div className="alert alert-error">{error}</div>}
 
           <form onSubmit={handleSubmit}>
@@ -137,6 +177,8 @@ export default function Payment() {
                 autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                readOnly={!!member}
+                style={member ? {background:'#f0f0f0'} : {}}
               />
               <small style={{color:'var(--gray)',fontSize:'0.8rem'}}>Your Member ID will be sent to this email</small>
             </div>
