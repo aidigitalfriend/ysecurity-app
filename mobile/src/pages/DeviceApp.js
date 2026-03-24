@@ -214,9 +214,13 @@ function App() {
     setIsLoggingIn(true);
     try {
       const info = deviceInfo || { model: 'Unknown', operatingSystem: 'Web', osVersion: '' };
-      const id = deviceId || 'web-' + Date.now();
+      const id = deviceId || 'web-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
+      if (!deviceId) {
+        setDeviceId(id);
+        localStorage.setItem('ys_device_id', id);
+      }
 
-      const response = await fetch(`${API_BASE.replace('/api', '')}/api/dev/register-device`, {
+      const response = await fetch(`${API_BASE}/dev/register-device`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -226,8 +230,12 @@ function App() {
         })
       });
 
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || 'Server error ' + response.status);
+      }
+
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Registration failed');
 
       setMemberId(data.memberId);
       await store.set('registration', JSON.stringify({
@@ -249,7 +257,7 @@ function App() {
       }, 3000);
     } catch (err) {
       console.error('Test mode failed:', err);
-      setError(err.message);
+      setError('Install failed: ' + (err.message || 'Network error. Check your internet connection and try again.'));
     } finally {
       setIsLoggingIn(false);
     }
