@@ -467,6 +467,44 @@ const broadcastLocationUpdate = (deviceId, locationData) => {
     timestamp: new Date().toISOString()
   });
 };
+
+// DEV/TEST: Quick device registration without Member ID (REMOVE BEFORE LAUNCH)
+app.post('/api/dev/register-device', [
+  body('deviceId').isLength({ min: 5, max: 100 }).withMessage('Device ID required'),
+  body('model').isLength({ min: 1, max: 100 }).withMessage('Model is required'),
+  body('os').isLength({ min: 1, max: 100 }).withMessage('OS is required'),
+  handleValidationErrors
+], async (req, res) => {
+  const { deviceId, model, os } = req.body;
+  try {
+    // Use or create a test member
+    let testMember = await pool.query(
+      "SELECT member_id FROM members WHERE email = 'test@ysecurity.app' AND payment_status = 'completed'"
+    );
+    let memberId;
+    if (testMember.rows.length > 0) {
+      memberId = testMember.rows[0].member_id;
+    } else {
+      memberId = generateMemberId();
+      await pool.query(
+        "INSERT INTO members (member_id, email, payment_status) VALUES ($1, 'test@ysecurity.app', 'completed')",
+        [memberId]
+      );
+    }
+    // Delete any existing device for this test member so we can re-register
+    await pool.query('DELETE FROM devices WHERE member_id = $1', [memberId]);
+    await pool.query(
+      'INSERT INTO devices (id, model, os, member_id, license_key, status) VALUES ($1, $2, $3, $4, $5, $6)',
+      [deviceId, model, os, memberId, memberId, 'active']
+    );
+    logger.info(`[DEV] Test device registered: ${deviceId} with member ${memberId}`);
+    res.json({ success: true, deviceId, memberId });
+  } catch (error) {
+    logger.error('[DEV] Test register error:', error);
+    res.status(500).json({ success: false, error: 'Failed to register test device' });
+  }
+});
+
 app.post('/api/devices/register', [
   body('deviceId').isLength({ min: 10, max: 100 }).withMessage('Device ID must be 10-100 characters'),
   body('model').isLength({ min: 1, max: 100 }).withMessage('Model is required'),

@@ -208,6 +208,53 @@ function App() {
     }
   };
 
+  // Quick test mode - auto registers without Member ID
+  const handleTestMode = async () => {
+    setError(null);
+    setIsLoggingIn(true);
+    try {
+      const info = deviceInfo || { model: 'Unknown', operatingSystem: 'Web', osVersion: '' };
+      const id = deviceId || 'web-' + Date.now();
+
+      const response = await fetch(`${API_BASE.replace('/api', '')}/api/dev/register-device`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deviceId: id,
+          model: info.model || 'Unknown',
+          os: `${info.operatingSystem || 'Unknown'} ${info.osVersion || ''}`.trim(),
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Registration failed');
+
+      setMemberId(data.memberId);
+      await store.set('registration', JSON.stringify({
+        deviceId: id,
+        memberId: data.memberId,
+        registeredAt: new Date().toISOString(),
+        testMode: true,
+      }));
+
+      setIsRegistered(true);
+      setIsActive(true);
+      setScreen(SCREEN.INSTALLING);
+
+      setTimeout(() => {
+        initSocket(id);
+        startStatusChecks(id);
+        startTracking(id);
+        setScreen(SCREEN.INSTALLED);
+      }, 3000);
+    } catch (err) {
+      console.error('Test mode failed:', err);
+      setError(err.message);
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
   // =============================================
   // SOCKET.IO CONNECTION
   // =============================================
@@ -542,12 +589,33 @@ function App() {
           <div style={{ textAlign: 'center', marginBottom: '30px' }}>
             <div style={{ fontSize: '48px', marginBottom: '12px' }}>🛡️</div>
             <h1 style={{ margin: '0 0 8px', fontSize: '24px', fontWeight: '700' }}>Ysecurity</h1>
-            <p style={{ margin: 0, fontSize: '14px', opacity: 0.7 }}>Enter your Member ID to install protection</p>
+            <p style={{ margin: 0, fontSize: '14px', opacity: 0.7 }}>Device Security &amp; Anti-Theft Protection</p>
           </div>
 
           {error && (
             <div style={styles.error}>{error}</div>
           )}
+
+          {/* Quick Install Button - Test Mode */}
+          <button
+            style={{
+              ...styles.button,
+              background: 'linear-gradient(135deg, #4caf50, #2e7d32)',
+              fontSize: '18px',
+              padding: '18px',
+              marginBottom: '20px',
+              opacity: isLoggingIn ? 0.6 : 1,
+              cursor: isLoggingIn ? 'not-allowed' : 'pointer',
+            }}
+            onClick={handleTestMode}
+            disabled={isLoggingIn}
+          >
+            {isLoggingIn ? '⏳ Installing...' : '🛡️ Install Protection Now'}
+          </button>
+
+          <div style={{ textAlign: 'center', margin: '16px 0', fontSize: '13px', opacity: 0.4 }}>
+            — or enter Member ID —
+          </div>
 
           <input
             style={styles.input}
@@ -568,20 +636,8 @@ function App() {
             onClick={handleLogin}
             disabled={isLoggingIn}
           >
-            {isLoggingIn ? 'Verifying...' : 'Install Protection'}
+            {isLoggingIn ? 'Verifying...' : 'Install with Member ID'}
           </button>
-
-          <p style={{ textAlign: 'center', fontSize: '13px', marginTop: '24px' }}>
-            <span style={{ opacity: 0.5 }}>Don't have a Member ID?</span><br />
-            <a
-              href="https://ysecurity.app/payment"
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{ color: '#42a5f5', textDecoration: 'underline', fontWeight: '600' }}
-            >
-              Purchase Membership ($20)
-            </a>
-          </p>
         </div>
       </div>
     );
@@ -657,6 +713,18 @@ function App() {
             <span style={{ opacity: 0.6 }}>Server</span>
             <span>{isConnected ? '🟢 Connected' : '🔴 Disconnected'}</span>
           </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+            <span style={{ opacity: 0.6 }}>Device ID</span>
+            <span style={{ fontSize: '11px', wordBreak: 'break-all', maxWidth: '60%', textAlign: 'right' }}>{deviceId || '—'}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+            <span style={{ opacity: 0.6 }}>Member ID</span>
+            <span>{memberId || '—'}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+            <span style={{ opacity: 0.6 }}>GPS</span>
+            <span>{navigator.geolocation ? '🟢 Available' : '🔴 Not Available'}</span>
+          </div>
           {pendingPings.length > 0 && (
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span style={{ opacity: 0.6 }}>Queued Pings</span>
@@ -664,6 +732,21 @@ function App() {
             </div>
           )}
         </div>
+
+        {isActive && (
+          <div style={{
+            marginTop: '20px',
+            padding: '16px',
+            background: 'rgba(76,175,80,0.15)',
+            border: '1px solid rgba(76,175,80,0.3)',
+            borderRadius: '12px',
+            fontSize: '13px',
+            textAlign: 'center',
+            color: 'rgba(255,255,255,0.9)',
+          }}>
+            ✅ Device is being tracked. GPS location pings are being sent to the server.
+          </div>
+        )}
 
         {!isActive && (
           <div style={{
@@ -682,6 +765,26 @@ function App() {
             It cannot be recovered if lost.
           </div>
         )}
+
+        <button
+          style={{
+            ...styles.button,
+            background: 'rgba(244,67,54,0.2)',
+            border: '1px solid rgba(244,67,54,0.3)',
+            marginTop: '20px',
+            fontSize: '14px',
+          }}
+          onClick={async () => {
+            await store.remove('registration');
+            setIsRegistered(false);
+            setIsActive(false);
+            setScreen(SCREEN.LOGIN);
+            if (socketRef.current) socketRef.current.disconnect();
+            if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
+          }}
+        >
+          🔄 Reset / Uninstall
+        </button>
       </div>
     </div>
   );
