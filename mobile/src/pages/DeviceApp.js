@@ -789,25 +789,7 @@ function App() {
           </div>
         )}
 
-        <button
-          style={{
-            ...styles.button,
-            background: 'rgba(244,67,54,0.2)',
-            border: '1px solid rgba(244,67,54,0.3)',
-            marginTop: '20px',
-            fontSize: '14px',
-          }}
-          onClick={async () => {
-            await store.remove('registration');
-            setIsRegistered(false);
-            setIsActive(false);
-            setScreen(SCREEN.LOGIN);
-            if (socketRef.current) socketRef.current.disconnect();
-            if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
-          }}
-        >
-          🔄 Reset / Uninstall
-        </button>
+
       </div>
     </div>
   );

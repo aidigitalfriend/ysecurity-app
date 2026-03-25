@@ -40,6 +40,7 @@ function AdminDashboard() {
   const [members, setMembers] = useState([]);
   const [activateDialog, setActivateDialog] = useState({ open: false, memberId: '' });
   const [confirmDeleteDialog, setConfirmDeleteDialog] = useState({ open: false, memberId: null });
+  const [confirmResetDialog, setConfirmResetDialog] = useState({ open: false, deviceId: null, memberId: null });
 
   useEffect(() => {
     if (authToken) {
@@ -239,6 +240,25 @@ function AdminDashboard() {
     }
   };
 
+  const resetDevice = async (deviceId) => {
+    try {
+      const response = await fetch(`${API_BASE}/admin/devices/${encodeURIComponent(deviceId)}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      const data = await response.json();
+      if (data.success) {
+        showAlert('Device reset successfully. Member can re-register.', 'success');
+        loadDevices();
+        setConfirmResetDialog({ open: false, deviceId: null, memberId: null });
+      } else {
+        showAlert(data.error || 'Reset failed', 'error');
+      }
+    } catch (error) {
+      showAlert('Failed to reset device', 'error');
+    }
+  };
+
   const deleteMember = async (memberId) => {
     try {
       const response = await fetch(`${API_BASE}/admin/members/${encodeURIComponent(memberId)}`, {
@@ -310,6 +330,7 @@ function AdminDashboard() {
             onSendCommand={sendCommand}
             onActivate={() => setActivateDialog({ open: true, memberId: '' })}
             onDeactivate={deactivateDevice}
+            onResetDevice={(deviceId, memberId) => setConfirmResetDialog({ open: true, deviceId, memberId })}
           />
         </TabPanel>
 
@@ -392,6 +413,29 @@ function AdminDashboard() {
         </DialogActions>
       </Dialog>
 
+      {/* Confirm Device Reset Dialog */}
+      <Dialog open={confirmResetDialog.open} onClose={() => setConfirmResetDialog({ open: false, deviceId: null, memberId: null })}>
+        <DialogTitle>Reset / Uninstall Device</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            This will delete device <strong>{confirmResetDialog.deviceId?.substring(0, 20)}...</strong>
+            {confirmResetDialog.memberId && <> for member <strong>{confirmResetDialog.memberId}</strong></>}.
+            All location history, commands, and tracking data will be removed.
+            The member can re-register a new device.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmResetDialog({ open: false, deviceId: null, memberId: null })}>Cancel</Button>
+          <Button
+            onClick={() => resetDevice(confirmResetDialog.deviceId)}
+            variant="contained"
+            color="error"
+          >
+            Reset Device
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* Confirm Delete Dialog */}
       <Dialog open={confirmDeleteDialog.open} onClose={() => setConfirmDeleteDialog({ open: false, memberId: null })}>
         <DialogTitle>Delete Member</DialogTitle>
@@ -453,7 +497,7 @@ function TabPanel(props) {
 }
 
 // Devices Tab Component
-function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand, onActivate, onDeactivate }) {
+function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand, onActivate, onDeactivate, onResetDevice }) {
   const getStatusColor = (status) => {
     switch (status) {
       case 'active': return 'error';
@@ -551,6 +595,14 @@ function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand, onA
                       disabled={device.status !== 'active'}
                     >
                       <CameraAlt />
+                    </IconButton>
+                    <IconButton
+                      size="small"
+                      onClick={() => onResetDevice(device.id, device.member_id)}
+                      color="error"
+                      title="Reset / Uninstall Device"
+                    >
+                      <Delete />
                     </IconButton>
                   </TableCell>
                 </TableRow>

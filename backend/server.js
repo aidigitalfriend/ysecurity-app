@@ -1464,6 +1464,34 @@ app.post('/api/admin/devices/deactivate', [
   }
 });
 
+// Reset/delete a device only (admin) - keeps the member account
+app.delete('/api/admin/devices/:deviceId', [
+  authenticateToken,
+  param('deviceId').isLength({ min: 5, max: 100 }).withMessage('Invalid device ID'),
+  handleValidationErrors
+], async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+  const { deviceId } = req.params;
+
+  try {
+    const device = await pool.query('SELECT id, member_id FROM devices WHERE id = $1', [deviceId]);
+    if (device.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Device not found' });
+    }
+
+    // Delete device (cascades to commands, location_pings via FK)
+    await pool.query('DELETE FROM devices WHERE id = $1', [deviceId]);
+
+    logger.info(`Device ${deviceId} deleted by admin ${req.user.username}`);
+    res.json({ success: true, message: 'Device deleted. Member can re-register a new device.' });
+  } catch (error) {
+    logger.error('Device delete error:', error);
+    res.status(500).json({ success: false, error: 'Failed to delete device' });
+  }
+});
+
 // Delete member and their device (admin) - for when user loses their ID
 app.delete('/api/admin/members/:memberId', [
   authenticateToken,
