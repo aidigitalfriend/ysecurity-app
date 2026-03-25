@@ -295,6 +295,79 @@ function AdminDashboard() {
     }
   };
 
+  // Full-page login screen when not authenticated
+  if (loginDialog) {
+    return (
+      <Box sx={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'linear-gradient(135deg, #1a237e 0%, #0d47a1 50%, #01579b 100%)',
+      }}>
+        <Paper elevation={8} sx={{
+          p: 5,
+          width: '100%',
+          maxWidth: 400,
+          borderRadius: 3,
+          textAlign: 'center',
+        }}>
+          <Security sx={{ fontSize: 48, color: '#1a237e', mb: 1 }} />
+          <Typography variant="h5" sx={{ fontWeight: 700, mb: 0.5 }}>
+            Ysecurity Admin
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+            Sign in to access the dashboard
+          </Typography>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Username"
+            fullWidth
+            value={loginData.username}
+            onChange={(e) => setLoginData({...loginData, username: e.target.value})}
+            onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+            sx={{ mb: 2 }}
+          />
+          <TextField
+            margin="dense"
+            label="Password"
+            type="password"
+            fullWidth
+            value={loginData.password}
+            onChange={(e) => setLoginData({...loginData, password: e.target.value})}
+            onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+            sx={{ mb: 3 }}
+          />
+          <Button
+            variant="contained"
+            fullWidth
+            size="large"
+            onClick={handleLogin}
+            sx={{
+              py: 1.5,
+              fontWeight: 600,
+              backgroundColor: '#1a237e',
+              '&:hover': { backgroundColor: '#0d47a1' },
+            }}
+          >
+            LOGIN
+          </Button>
+        </Paper>
+        <Snackbar
+          open={alert.open}
+          autoHideDuration={4000}
+          onClose={() => setAlert({...alert, open: false})}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        >
+          <Alert severity={alert.severity} onClose={() => setAlert({...alert, open: false})}>
+            {alert.message}
+          </Alert>
+        </Snackbar>
+      </Box>
+    );
+  }
+
   return (
     <div style={{ backgroundColor: '#f5f5f5', minHeight: '100vh' }}>
       <AppBar position="static">
@@ -357,32 +430,6 @@ function AdminDashboard() {
           <ReportsTab authToken={authToken} />
         </TabPanel>
       </Container>
-
-      {/* Login Dialog */}
-      <Dialog open={loginDialog} onClose={() => {}}>
-        <DialogTitle>Admin Login</DialogTitle>
-        <DialogContent>
-          <TextField
-            autoFocus
-            margin="dense"
-            label="Username"
-            fullWidth
-            value={loginData.username}
-            onChange={(e) => setLoginData({...loginData, username: e.target.value})}
-          />
-          <TextField
-            margin="dense"
-            label="Password"
-            type="password"
-            fullWidth
-            value={loginData.password}
-            onChange={(e) => setLoginData({...loginData, password: e.target.value})}
-          />
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={handleLogin}>Login</Button>
-        </DialogActions>
-      </Dialog>
 
       {/* Activate Device Dialog */}
       <Dialog open={activateDialog.open} onClose={() => setActivateDialog({ open: false, memberId: '' })}>
