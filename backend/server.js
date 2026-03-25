@@ -1639,18 +1639,17 @@ app.get('/api/admin/devices/:deviceId/directory', [
       return res.status(404).json({ success: false, error: 'Device not found' });
     }
 
-    const [photosCount, locationsCount, activityCount, installLocation] = await Promise.all([
+    const [photosCount, locationsCount, activityCount, installLocation, latestLocation, activeGeofence] = await Promise.all([
       pool.query('SELECT COUNT(*)::int as count FROM device_photos WHERE device_id = $1', [deviceId]),
       pool.query('SELECT COUNT(*)::int as count FROM location_pings WHERE device_id = $1', [deviceId]),
       pool.query('SELECT COUNT(*)::int as count FROM device_activity WHERE device_id = $1', [deviceId]),
       pool.query('SELECT latitude, longitude, timestamp FROM location_pings WHERE device_id = $1 ORDER BY timestamp ASC LIMIT 1', [deviceId]),
+      pool.query('SELECT latitude, longitude, battery, network_type, accuracy, timestamp FROM location_pings WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 1', [deviceId]),
+      pool.query('SELECT params FROM commands WHERE device_id = $1 AND command = $2 ORDER BY created_at DESC LIMIT 1', [deviceId, 'geofence']),
     ]);
 
     // Get latest network info from most recent ping
-    const latestPing = await pool.query(
-      'SELECT network_type, battery, accuracy, timestamp FROM location_pings WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 1',
-      [deviceId]
-    );
+    const latestPing = latestLocation;
 
     res.json({
       success: true,
@@ -1662,7 +1661,9 @@ app.get('/api/admin/devices/:deviceId/directory', [
         activity: activityCount.rows[0].count,
       },
       installLocation: installLocation.rows[0] || null,
+      latestLocation: latestLocation.rows[0] || null,
       latestNetwork: latestPing.rows[0] || null,
+      geofence: activeGeofence.rows[0] ? (typeof activeGeofence.rows[0].params === 'string' ? JSON.parse(activeGeofence.rows[0].params) : activeGeofence.rows[0].params) : null,
     });
   } catch (error) {
     logger.error('Device directory error:', error);

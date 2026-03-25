@@ -14,7 +14,7 @@ import {
   PlayArrow, Stop, Folder, FolderOpen, Photo, History,
   Wifi, SignalCellularAlt, ArrowBack, Info
 } from '@mui/icons-material';
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Circle } from 'react-leaflet';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import io from 'socket.io-client';
 import { format } from 'date-fns';
@@ -554,6 +554,7 @@ function DevicesTab({ devices, authToken, onViewLocations, onMarkAsLost, onSendC
   const [openFolder, setOpenFolder] = useState(null); // 'pictures' | 'location' | 'network' | 'activity'
   const [folderData, setFolderData] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [geofenceDialog, setGeofenceDialog] = useState({ open: false, lat: '', lng: '', radius: '500' });
 
   const getStatusColor = (status) => {
     switch (status) {
@@ -828,7 +829,7 @@ function DevicesTab({ devices, authToken, onViewLocations, onMarkAsLost, onSendC
 
   // Device Directory View
   if (selectedDeviceId && deviceDir) {
-    const { device, folders, installLocation } = deviceDir;
+    const { device, folders, installLocation, latestLocation, geofence } = deviceDir;
     const folderConfig = [
       { key: 'pictures', label: 'Pictures', icon: '📸', subtitle: 'Photos & Images', count: folders.pictures, color: '#e3f2fd' },
       { key: 'location', label: 'Location', icon: '📍', subtitle: 'GPS Data', count: folders.location, color: '#e8f5e9' },
@@ -889,6 +890,11 @@ function DevicesTab({ devices, authToken, onViewLocations, onMarkAsLost, onSendC
                 {/* Action buttons */}
                 <Box sx={{ mt: 2, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
                   {device.status !== 'active' && (
+                    <Button size="small" variant="contained" color="success" startIcon={<PlayArrow />} onClick={() => onActivate()}>
+                      Activate Device
+                    </Button>
+                  )}
+                  {device.status !== 'active' && (
                     <Button size="small" variant="outlined" color="error" startIcon={<GpsFixed />} onClick={() => onMarkAsLost(device.id)}>
                       Mark as Lost
                     </Button>
@@ -903,6 +909,16 @@ function DevicesTab({ devices, authToken, onViewLocations, onMarkAsLost, onSendC
                   </Button>
                   <Button size="small" variant="outlined" color="info" startIcon={<CameraAlt />} onClick={() => onSendCommand(device.id, 'camera')} disabled={device.status !== 'active'}>
                     Camera
+                  </Button>
+                  <Button size="small" variant="outlined" color="secondary" startIcon={<LocationOn />}
+                    disabled={device.status !== 'active'}
+                    onClick={() => {
+                      const lat = latestLocation ? latestLocation.latitude : '';
+                      const lng = latestLocation ? latestLocation.longitude : '';
+                      setGeofenceDialog({ open: true, lat: lat.toString(), lng: lng.toString(), radius: geofence ? geofence.radius.toString() : '500' });
+                    }}
+                  >
+                    Set Geofence
                   </Button>
                   <Button size="small" variant="outlined" color="error" startIcon={<Delete />} onClick={() => onResetDevice(device.id, device.member_id)}>
                     Delete
@@ -936,6 +952,109 @@ function DevicesTab({ devices, authToken, onViewLocations, onMarkAsLost, onSendC
                   </Grid>
                 ))}
               </Grid>
+
+              {/* Device Location Map */}
+              {latestLocation && (
+                <Box sx={{ mt: 3 }}>
+                  <Typography variant="subtitle1" sx={{ mb: 1, fontWeight: 600 }}>📍 Device Location</Typography>
+                  <Box sx={{ height: 300, borderRadius: 2, overflow: 'hidden', border: '1px solid #e0e0e0' }}>
+                    <MapContainer
+                      center={[Number(latestLocation.latitude), Number(latestLocation.longitude)]}
+                      zoom={14}
+                      style={{ height: '100%', width: '100%' }}
+                    >
+                      <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
+                      <Marker position={[Number(latestLocation.latitude), Number(latestLocation.longitude)]}>
+                        <Popup>
+                          <strong>{device.model}</strong><br/>
+                          Last seen: {format(new Date(latestLocation.timestamp), 'MMM dd, yyyy HH:mm:ss')}<br/>
+                          Battery: {latestLocation.battery}%<br/>
+                          Network: {latestLocation.network_type}
+                        </Popup>
+                      </Marker>
+                      {geofence && geofence.lat && geofence.lng && geofence.radius && (
+                        <Circle
+                          center={[Number(geofence.lat), Number(geofence.lng)]}
+                          radius={Number(geofence.radius)}
+                          pathOptions={{ color: '#9c27b0', fillColor: '#ce93d8', fillOpacity: 0.2 }}
+                        />
+                      )}
+                    </MapContainer>
+                  </Box>
+                  <Box sx={{ mt: 1, display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                    <Typography variant="body2" color="textSecondary">
+                      Lat: {Number(latestLocation.latitude).toFixed(6)}, Lng: {Number(latestLocation.longitude).toFixed(6)}
+                    </Typography>
+                    <Typography variant="body2" color="textSecondary">
+                      🔋 {latestLocation.battery}% | 📡 {latestLocation.network_type}
+                    </Typography>
+                    <Typography variant="body2" color="textSecondary">
+                      Last updated: {format(new Date(latestLocation.timestamp), 'MMM dd, yyyy HH:mm:ss')}
+                    </Typography>
+                  </Box>
+                  {geofence && (
+                    <Chip
+                      label={`Geofence: ${geofence.radius}m radius`}
+                      color="secondary"
+                      size="small"
+                      variant="outlined"
+                      sx={{ mt: 1 }}
+                      icon={<LocationOn />}
+                    />
+                  )}
+                </Box>
+              )}
+              {!latestLocation && (
+                <Box sx={{ mt: 3, p: 2, bgcolor: '#f5f5f5', borderRadius: 2, textAlign: 'center' }}>
+                  <Typography color="textSecondary">📍 No location data yet. Device will report its location once activated.</Typography>
+                </Box>
+              )}
+
+              {/* Geofence Dialog */}
+              <Dialog open={geofenceDialog.open} onClose={() => setGeofenceDialog({ ...geofenceDialog, open: false })}>
+                <DialogTitle>Set Geofence Area</DialogTitle>
+                <DialogContent>
+                  <Typography variant="body2" sx={{ mb: 2 }}>
+                    Define a geofence zone for this device. You will be alerted when the device leaves this area.
+                  </Typography>
+                  <TextField
+                    margin="dense" label="Center Latitude" fullWidth type="number"
+                    value={geofenceDialog.lat}
+                    onChange={(e) => setGeofenceDialog({ ...geofenceDialog, lat: e.target.value })}
+                    inputProps={{ step: '0.0001', min: -90, max: 90 }}
+                    sx={{ mb: 1 }}
+                  />
+                  <TextField
+                    margin="dense" label="Center Longitude" fullWidth type="number"
+                    value={geofenceDialog.lng}
+                    onChange={(e) => setGeofenceDialog({ ...geofenceDialog, lng: e.target.value })}
+                    inputProps={{ step: '0.0001', min: -180, max: 180 }}
+                    sx={{ mb: 1 }}
+                  />
+                  <TextField
+                    margin="dense" label="Radius (meters)" fullWidth type="number"
+                    value={geofenceDialog.radius}
+                    onChange={(e) => setGeofenceDialog({ ...geofenceDialog, radius: e.target.value })}
+                    inputProps={{ min: 50, max: 50000, step: 50 }}
+                  />
+                </DialogContent>
+                <DialogActions>
+                  <Button onClick={() => setGeofenceDialog({ ...geofenceDialog, open: false })}>Cancel</Button>
+                  <Button
+                    variant="contained" color="secondary"
+                    onClick={() => {
+                      const { lat, lng, radius } = geofenceDialog;
+                      if (lat && lng && radius) {
+                        onSendCommand(device.id, 'geofence', { lat: parseFloat(lat), lng: parseFloat(lng), radius: parseInt(radius) });
+                        setGeofenceDialog({ ...geofenceDialog, open: false });
+                        setTimeout(() => openDeviceDirectory(device.id), 1000);
+                      }
+                    }}
+                  >
+                    Set Geofence
+                  </Button>
+                </DialogActions>
+              </Dialog>
             </>
           )}
         </CardContent>
@@ -947,17 +1066,7 @@ function DevicesTab({ devices, authToken, onViewLocations, onMarkAsLost, onSendC
   return (
     <Card>
       <CardContent>
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-          <Typography variant="h6">Device Registry</Typography>
-          <Button
-            variant="contained"
-            color="success"
-            startIcon={<PlayArrow />}
-            onClick={onActivate}
-          >
-            Activate Device
-          </Button>
-        </Box>
+        <Typography variant="h6" sx={{ mb: 2 }}>Device Registry</Typography>
         <TableContainer component={Paper} sx={{ maxHeight: 600 }}>
           <Table stickyHeader>
             <TableHead>
