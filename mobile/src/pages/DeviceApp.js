@@ -124,6 +124,7 @@ function App() {
 
         initSocket(id);
         startStatusChecks(id);
+        startTracking(id);
         setScreen(SCREEN.INSTALLED);
       } else {
         // Auto-install with default Member ID

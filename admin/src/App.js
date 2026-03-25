@@ -423,6 +423,7 @@ function AdminDashboard() {
           <TrackingTab
             locations={locations}
             selectedDevice={selectedDevice}
+            authToken={authToken}
           />
         </TabPanel>
 
@@ -791,6 +792,16 @@ function DevicesTab({ devices, authToken, onViewLocations, onMarkAsLost, onSendC
 
     if (openFolder === 'activity') {
       const activities = folderData.activities || [];
+      const actionColors = {
+        installed: 'success', first_location: 'primary', network_detected: 'info',
+        marked_lost: 'error', activated: 'success', deactivated: 'warning',
+        command_sent: 'secondary', geofence_breach: 'error', photo_captured: 'info',
+      };
+      const actionLabels = {
+        installed: '📱 Installed', first_location: '📍 First Location', network_detected: '📡 Network',
+        marked_lost: '🚨 Marked Lost', activated: '✅ Activated', deactivated: '⏸️ Deactivated',
+        command_sent: '⚡ Command', geofence_breach: '🚧 Geofence Breach', photo_captured: '📸 Photo',
+      };
       return (
         <Box>
           <Typography variant="h6" gutterBottom>📋 Activity Logs ({activities.length})</Typography>
@@ -811,9 +822,14 @@ function DevicesTab({ devices, authToken, onViewLocations, onMarkAsLost, onSendC
                     <TableRow key={a.id}>
                       <TableCell>{format(new Date(a.created_at), 'MMM dd, yyyy HH:mm:ss')}</TableCell>
                       <TableCell>
-                        <Chip label={a.action} size="small" variant="outlined" />
+                        <Chip
+                          label={actionLabels[a.action] || a.action}
+                          size="small"
+                          color={actionColors[a.action] || 'default'}
+                          variant="outlined"
+                        />
                       </TableCell>
-                      <TableCell sx={{ maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      <TableCell sx={{ maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {a.details || '—'}
                       </TableCell>
                     </TableRow>
@@ -1225,40 +1241,109 @@ function MembersTab({ members, onDelete, onActivate }) {
 }
 
 // Tracking Tab Component
-function TrackingTab({ locations, selectedDevice }) {
+function TrackingTab({ locations, selectedDevice, authToken }) {
+  const [allDeviceLocations, setAllDeviceLocations] = useState([]);
+  const [trackingLoading, setTrackingLoading] = useState(true);
+
+  useEffect(() => {
+    loadAllLocations();
+    const interval = setInterval(loadAllLocations, 30000); // refresh every 30s
+    return () => clearInterval(interval);
+  }, []);
+
+  const loadAllLocations = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/admin/devices/all-locations`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      const data = await response.json();
+      if (data.success) {
+        setAllDeviceLocations(data.locations);
+      }
+    } catch (error) {
+      console.error('Failed to load all locations:', error);
+    } finally {
+      setTrackingLoading(false);
+    }
+  };
+
+  const displayLocations = allDeviceLocations.length > 0 ? allDeviceLocations : locations;
+
   return (
     <Card>
       <CardContent>
-        <Typography variant="h6" gutterBottom>
-          Live Tracking Map {selectedDevice && `- Device: ${selectedDevice.substring(0, 12)}...`}
-        </Typography>
-        <div style={{ height: 500, width: '100%' }}>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+          <Typography variant="h6">
+            All Devices Map ({allDeviceLocations.length} devices with location)
+          </Typography>
+          <Button size="small" variant="outlined" onClick={loadAllLocations} startIcon={<GpsFixed />}>
+            Refresh
+          </Button>
+        </Box>
+        <div style={{ height: 550, width: '100%' }}>
           <MapContainer
-            center={locations.length > 0 ? [locations[0].latitude, locations[0].longitude] : [0, 0]}
-            zoom={locations.length > 0 ? 13 : 2}
+            center={displayLocations.length > 0 ? [displayLocations[0].latitude, displayLocations[0].longitude] : [0, 0]}
+            zoom={displayLocations.length > 0 ? 10 : 2}
             style={{ height: '100%', width: '100%' }}
           >
             <TileLayer
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-              attribution='© OpenStreetMap contributors'
+              attribution='&copy; OpenStreetMap contributors'
             />
-            {locations.map((loc, index) => (
+            {displayLocations.map((loc, index) => (
               <Marker
-                key={index}
+                key={loc.device_id || index}
                 position={[loc.latitude, loc.longitude]}
               >
                 <Popup>
-                  <strong>Device: {selectedDevice?.substring(0, 12)}...</strong><br/>
+                  <strong>{loc.model || 'Device'}</strong> ({(loc.device_id || '').substring(0, 12)}...)<br/>
+                  Status: <strong>{loc.status || '—'}</strong><br/>
+                  Member: {loc.member_id || '—'}<br/>
                   Time: {format(new Date(loc.timestamp), 'MMM dd, yyyy HH:mm:ss')}<br/>
                   Battery: {loc.battery}%<br/>
-                  Accuracy: {loc.accuracy}m<br/>
-                  Network: {loc.network_type}
-                  {loc.alert && <><br/><strong>Alert: {loc.alert}</strong></>}
+                  Network: {loc.network_type}<br/>
+                  Accuracy: {loc.accuracy}m
+                  {loc.alert && <><br/><strong style={{color:'red'}}>Alert: {loc.alert}</strong></>}
                 </Popup>
               </Marker>
             ))}
           </MapContainer>
         </div>
+        {allDeviceLocations.length > 0 && (
+          <TableContainer component={Paper} sx={{ mt: 2, maxHeight: 300 }}>
+            <Table size="small" stickyHeader>
+              <TableHead>
+                <TableRow>
+                  <TableCell>Device</TableCell>
+                  <TableCell>Model</TableCell>
+                  <TableCell>Status</TableCell>
+                  <TableCell>Member</TableCell>
+                  <TableCell>Last Location</TableCell>
+                  <TableCell>Battery</TableCell>
+                  <TableCell>Network</TableCell>
+                  <TableCell>Last Seen</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {allDeviceLocations.map((loc) => (
+                  <TableRow key={loc.device_id}>
+                    <TableCell>{(loc.device_id || '').substring(0, 15)}...</TableCell>
+                    <TableCell>{loc.model}</TableCell>
+                    <TableCell>
+                      <Chip label={loc.status} size="small" color={loc.status === 'active' ? 'error' : loc.status === 'reported' ? 'info' : 'default'} />
+                    </TableCell>
+                    <TableCell>{loc.member_id || '—'}</TableCell>
+                    <TableCell>{Number(loc.latitude).toFixed(4)}, {Number(loc.longitude).toFixed(4)}</TableCell>
+                    <TableCell>{loc.battery}%</TableCell>
+                    <TableCell>{loc.network_type}</TableCell>
+                    <TableCell>{format(new Date(loc.timestamp), 'MMM dd, HH:mm:ss')}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        )}
+        {trackingLoading && <Box sx={{ textAlign: 'center', py: 2 }}><CircularProgress size={24} /></Box>}
       </CardContent>
     </Card>
   );

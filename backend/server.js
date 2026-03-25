@@ -666,13 +666,10 @@ app.post('/api/devices/:deviceId/ping', [
     : rawNetworkType;
 
   try {
-    // Verify device exists and is active
+    // Verify device exists
     const device = await pool.query('SELECT status FROM devices WHERE id = $1', [deviceId]);
     if (device.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'Device not found' });
-    }
-    if (device.rows[0].status !== 'active') {
-      return res.status(403).json({ success: false, error: 'Device not active' });
     }
 
     const query = alert
@@ -684,6 +681,18 @@ app.post('/api/devices/:deviceId/ping', [
       : [deviceId, lat, lng, accuracy, battery, networkType];
 
     await pool.query(query, values);
+
+    // Log first ping as activity (install location + network)
+    const pingCount = await pool.query('SELECT COUNT(*)::int as count FROM location_pings WHERE device_id = $1', [deviceId]);
+    if (pingCount.rows[0].count === 1) {
+      await logDeviceActivity(deviceId, 'first_location', JSON.stringify({ lat, lng, accuracy, battery, networkType }));
+      await logDeviceActivity(deviceId, 'network_detected', `Network: ${networkType}, Battery: ${battery}%`);
+    }
+
+    // Log geofence breach as activity
+    if (alert === 'geofence_breach') {
+      await logDeviceActivity(deviceId, 'geofence_breach', JSON.stringify({ lat, lng }));
+    }
 
     logger.info(`Location ping saved for device ${deviceId}`);
     res.json({ success: true });
@@ -778,6 +787,32 @@ app.get('/api/admin/devices', authenticateToken, async (req, res) => {
   } catch (error) {
     logger.error('Database error:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch devices' });
+  }
+});
+
+// Get all devices latest locations for tracking dashboard
+app.get('/api/admin/devices/all-locations', [
+  authenticateToken,
+  handleValidationErrors
+], async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+
+  try {
+    // Get latest ping for each device using DISTINCT ON
+    const result = await pool.query(`
+      SELECT DISTINCT ON (lp.device_id)
+        lp.device_id, lp.latitude, lp.longitude, lp.battery, lp.network_type, lp.accuracy, lp.timestamp, lp.alert,
+        d.model, d.os, d.status, d.member_id
+      FROM location_pings lp
+      JOIN devices d ON d.id = lp.device_id
+      ORDER BY lp.device_id, lp.timestamp DESC
+    `);
+    res.json({ success: true, locations: result.rows });
+  } catch (error) {
+    logger.error('All locations error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch locations' });
   }
 });
 
