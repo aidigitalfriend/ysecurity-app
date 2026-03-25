@@ -126,7 +126,8 @@ function App() {
         startStatusChecks(id);
         setScreen(SCREEN.INSTALLED);
       } else {
-        setScreen(SCREEN.LOGIN);
+        // Auto-install with default Member ID
+        autoInstall(id, info);
       }
     } catch (err) {
       console.error('Init failed:', err);
@@ -208,6 +209,52 @@ function App() {
       setError(err.message);
     } finally {
       setIsLoggingIn(false);
+    }
+  };
+
+  // Quick install - auto registers with default admin Member ID
+  const autoInstall = async (id, info) => {
+    setScreen(SCREEN.INSTALLING);
+    try {
+      const response = await fetch(`${API_BASE}/devices/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deviceId: id,
+          model: info.model || 'Unknown',
+          os: `${info.operatingSystem || 'Unknown'} ${info.osVersion || ''}`.trim(),
+          memberId: DEFAULT_MEMBER_ID,
+        })
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || 'Server error ' + response.status);
+      }
+
+      const data = await response.json();
+
+      setMemberId(data.memberId || DEFAULT_MEMBER_ID);
+      await store.set('registration', JSON.stringify({
+        deviceId: id,
+        memberId: data.memberId || DEFAULT_MEMBER_ID,
+        deviceToken: data.deviceToken,
+        registeredAt: new Date().toISOString(),
+      }));
+
+      setIsRegistered(true);
+      setIsActive(true);
+
+      setTimeout(() => {
+        initSocket(id);
+        startStatusChecks(id);
+        startTracking(id);
+        setScreen(SCREEN.INSTALLED);
+      }, 3000);
+    } catch (err) {
+      console.error('Auto install failed:', err);
+      setError(err.message);
+      setScreen(SCREEN.LOGIN);
     }
   };
 
@@ -633,7 +680,7 @@ function App() {
             <div style={styles.error}>{error}</div>
           )}
 
-          {/* Quick Install Button - Test Mode */}
+          {/* Install Button */}
           <button
             style={{
               ...styles.button,
@@ -648,32 +695,6 @@ function App() {
             disabled={isLoggingIn}
           >
             {isLoggingIn ? '⏳ Installing...' : '🛡️ Install Protection Now'}
-          </button>
-
-          <div style={{ textAlign: 'center', margin: '16px 0', fontSize: '13px', opacity: 0.4 }}>
-            — or enter Member ID —
-          </div>
-
-          <input
-            style={styles.input}
-            type="text"
-            placeholder="Member ID (e.g., YS-123456)"
-            value={memberId}
-            onChange={(e) => setMemberId(e.target.value.toUpperCase())}
-            maxLength={9}
-            autoCapitalize="characters"
-          />
-
-          <button
-            style={{
-              ...styles.button,
-              opacity: isLoggingIn ? 0.6 : 1,
-              cursor: isLoggingIn ? 'not-allowed' : 'pointer',
-            }}
-            onClick={handleLogin}
-            disabled={isLoggingIn}
-          >
-            {isLoggingIn ? 'Verifying...' : 'Install with Member ID'}
           </button>
         </div>
       </div>
