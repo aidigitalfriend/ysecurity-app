@@ -185,6 +185,7 @@ app.use(bodyParser.json({ limit: '10mb' }));
 // Serve admin dashboard React app at /admin
 app.use('/admin', express.static(path.join(__dirname, 'admin')));
 app.get('/admin/*', (req, res) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.sendFile(path.join(__dirname, 'admin', 'index.html'));
 });
 
@@ -1639,6 +1640,7 @@ app.use((req, res) => {
   if (req.path.startsWith('/api/')) {
     return res.status(404).json({ success: false, error: 'Endpoint not found' });
   }
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
