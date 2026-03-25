@@ -2,6 +2,7 @@
   "name": "ysecurity-app-admin",
   "version": "1.0.0",
   "description": "Modern admin dashboard for ysecurity-app",
+  "homepage": "/admin",
   "main": "index.js",
   "scripts": {
     "start": "react-scripts start",

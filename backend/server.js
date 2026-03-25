@@ -181,6 +181,13 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
 });
 
 app.use(bodyParser.json({ limit: '10mb' }));
+
+// Serve admin dashboard React app at /admin
+app.use('/admin', express.static(path.join(__dirname, 'admin')));
+app.get('/admin/*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin', 'index.html'));
+});
+
 app.use(express.static('public'));
 
 const { body, param, validationResult } = require('express-validator');
