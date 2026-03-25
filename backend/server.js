@@ -883,8 +883,10 @@ app.get('/api/devices/:deviceId/status', [
 
   try {
     const result = await pool.query('SELECT status FROM devices WHERE id = $1', [deviceId]);
-    const status = result.rows.length > 0 ? result.rows[0].status : 'installed';
-    res.json({ success: true, status });
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Device not found' });
+    }
+    res.json({ success: true, status: result.rows[0].status });
   } catch (error) {
     logger.error('Database error:', error);
     res.status(500).json({ success: false, error: 'Database error' });

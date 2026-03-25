@@ -310,6 +310,17 @@ function App() {
     if (!isOnline) return;
     try {
       const response = await fetch(`${API_BASE}/devices/${id}/status`);
+      if (response.status === 404) {
+        // Device was deleted from admin — reset local state
+        await store.remove('registration');
+        if (socketRef.current) socketRef.current.disconnect();
+        if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
+        setIsRegistered(false);
+        setIsActive(false);
+        setMemberId('');
+        setScreen(SCREEN.LOGIN);
+        return;
+      }
       if (!response.ok) return;
 
       const data = await response.json();
