@@ -272,7 +272,8 @@ function AdminDashboard() {
         loadDevices();
         setConfirmDeleteDialog({ open: false, memberId: null });
       } else {
-        showAlert(data.error || 'Delete failed', 'error');
+        const errMsg = data.error || (data.errors && data.errors.map(e => e.msg).join(', ')) || 'Delete failed';
+        showAlert(errMsg, 'error');
       }
     } catch (error) {
       showAlert('Failed to delete member', 'error');
