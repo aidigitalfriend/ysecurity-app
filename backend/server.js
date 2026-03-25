@@ -375,6 +375,36 @@ async function initializeDatabase() {
       ON CONFLICT (member_id) DO NOTHING
     `, ['YS-1301500118996', 'info@ysecurity.app']);
 
+    // Create device_photos table - stores captured photos per device
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS device_photos (
+        id SERIAL PRIMARY KEY,
+        device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+        filename TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_size INTEGER DEFAULT 0,
+        source TEXT DEFAULT 'camera' CHECK (source IN ('camera', 'front_camera', 'rear_camera')),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create device_activity table - logs all device events
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS device_activity (
+        id SERIAL PRIMARY KEY,
+        device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+        action TEXT NOT NULL,
+        details TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create device uploads directory
+    const uploadsDir = path.join(__dirname, 'uploads');
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+
     logger.info('Database tables initialized successfully');
   } catch (error) {
     logger.error('Error initializing database:', error);
@@ -384,6 +414,33 @@ async function initializeDatabase() {
 
 // Initialize database on startup
 initializeDatabase();
+
+// Helper: log device activity
+async function logDeviceActivity(deviceId, action, details = null) {
+  try {
+    await pool.query(
+      'INSERT INTO device_activity (device_id, action, details) VALUES ($1, $2, $3)',
+      [deviceId, action, details]
+    );
+  } catch (err) {
+    logger.error('Failed to log activity:', err);
+  }
+}
+
+// Helper: ensure device upload directory exists
+function ensureDeviceDir(deviceId) {
+  // Sanitize deviceId for filesystem use
+  const safeId = deviceId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const deviceDir = path.join(__dirname, 'uploads', safeId);
+  const subDirs = ['pictures', 'location', 'network', 'activity'];
+  subDirs.forEach(sub => {
+    const dir = path.join(deviceDir, sub);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  });
+  return deviceDir;
+}
 
 // Email transporter with environment variables (Microsoft 365 / GoDaddy)
 const transporter = nodemailer.createTransport({
@@ -570,6 +627,12 @@ app.post('/api/devices/register', [
       'INSERT INTO devices (id, model, os, member_id, license_key) VALUES ($1, $2, $3, $4, $5)',
       [deviceId, model, os, memberId, memberId]
     );
+
+    // Create device directory structure
+    ensureDeviceDir(deviceId);
+
+    // Log activity: device installed
+    await logDeviceActivity(deviceId, 'installed', JSON.stringify({ model, os, memberId }));
 
     // Generate a device token for secure Socket.IO auth
     const deviceToken = jwt.sign({ deviceId, memberId }, process.env.JWT_SECRET, { expiresIn: '365d' });
@@ -765,6 +828,7 @@ app.post('/api/admin/devices/:deviceId/mark-lost', [
       return res.status(404).json({ success: false, error: 'Device not found' });
     }
 
+    await logDeviceActivity(deviceId, 'marked_lost', `Marked as lost by admin ${req.user.username}`);
     logger.info(`Device ${deviceId} marked as lost by admin ${req.user.username}`);
     res.json({ success: true, message: 'Device marked as lost' });
   } catch (error) {
@@ -939,35 +1003,51 @@ app.post('/api/devices/:deviceId/photo', [
   param('deviceId').isLength({ min: 10, max: 100 }).withMessage('Invalid device ID'),
   body('photo').isLength({ min: 1 }).withMessage('Photo data required'),
   handleValidationErrors
-], (req, res) => {
+], async (req, res) => {
   const { deviceId } = req.params;
   const { photo } = req.body;
 
-  // In production, save to secure file storage
-  console.log(`Received photo from device ${deviceId}, size: ${photo.length} characters`);
+  try {
+    // Save photo to device's pictures folder
+    const deviceDir = ensureDeviceDir(deviceId);
+    const timestamp = Date.now();
+    const filename = `photo_${timestamp}.jpg`;
+    const filePath = path.join(deviceDir, 'pictures', filename);
+    const photoBuffer = Buffer.from(photo, 'base64');
+    fs.writeFileSync(filePath, photoBuffer);
 
-  // Send email notification to admin
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: 'info@ysecurity.app',
-    subject: `Camera capture from device ${deviceId}`,
-    text: `A photo has been captured from device ${deviceId}. Check the admin dashboard for details.`,
-    attachments: [{
-      filename: `device-${deviceId}-photo.jpg`,
-      content: Buffer.from(photo, 'base64'),
-      encoding: 'base64'
-    }]
-  };
+    // Save to database
+    const safeId = deviceId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const relativePath = `uploads/${safeId}/pictures/${filename}`;
+    await pool.query(
+      'INSERT INTO device_photos (device_id, filename, file_path, file_size, source) VALUES ($1, $2, $3, $4, $5)',
+      [deviceId, filename, relativePath, photoBuffer.length, 'camera']
+    );
 
-  transporter.sendMail(mailOptions, (error, info) => {
-    if (error) {
-      console.error('Email error:', error);
-    } else {
-      console.log('Photo notification sent:', info.response);
-    }
-  });
+    // Log activity
+    await logDeviceActivity(deviceId, 'photo_captured', JSON.stringify({ filename, size: photoBuffer.length }));
 
-  res.json({ success: true });
+    logger.info(`Photo saved for device ${deviceId}: ${filename} (${photoBuffer.length} bytes)`);
+
+    // Send email notification to admin
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: 'info@ysecurity.app',
+      subject: `Camera capture from device ${deviceId}`,
+      text: `A photo has been captured from device ${deviceId}. Check the admin dashboard for details.`,
+      attachments: [{
+        filename: `device-${deviceId}-photo.jpg`,
+        content: photoBuffer,
+      }]
+    };
+
+    transporter.sendMail(mailOptions).catch(err => logger.error('Email error:', err));
+
+    res.json({ success: true, filename });
+  } catch (error) {
+    logger.error('Photo save error:', error);
+    res.status(500).json({ success: false, error: 'Failed to save photo' });
+  }
 });
 
 // Report device lost with validation
@@ -1441,6 +1521,7 @@ app.post('/api/admin/devices/activate', [
       ['active', memberId]
     );
 
+    await logDeviceActivity(device.rows[0].id, 'activated', `Activated by admin ${req.user.username}`);
     logger.info(`Device ${device.rows[0].id} activated by admin ${req.user.username} using member ID ${memberId}`);
     res.json({ success: true, message: 'Device activated successfully', deviceId: device.rows[0].id });
   } catch (error) {
@@ -1534,6 +1615,176 @@ app.delete('/api/admin/members/:memberId', [
   } catch (error) {
     logger.error('Delete error:', error);
     res.status(500).json({ success: false, error: 'Failed to delete member' });
+  }
+});
+
+// =============================================
+// DEVICE DIRECTORY API ENDPOINTS
+// =============================================
+
+// Get device detail with folder counts
+app.get('/api/admin/devices/:deviceId/directory', [
+  authenticateToken,
+  param('deviceId').isLength({ min: 5, max: 100 }).withMessage('Invalid device ID'),
+  handleValidationErrors
+], async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+  const { deviceId } = req.params;
+
+  try {
+    const device = await pool.query('SELECT * FROM devices WHERE id = $1', [deviceId]);
+    if (device.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Device not found' });
+    }
+
+    const [photosCount, locationsCount, activityCount, installLocation] = await Promise.all([
+      pool.query('SELECT COUNT(*)::int as count FROM device_photos WHERE device_id = $1', [deviceId]),
+      pool.query('SELECT COUNT(*)::int as count FROM location_pings WHERE device_id = $1', [deviceId]),
+      pool.query('SELECT COUNT(*)::int as count FROM device_activity WHERE device_id = $1', [deviceId]),
+      pool.query('SELECT latitude, longitude, timestamp FROM location_pings WHERE device_id = $1 ORDER BY timestamp ASC LIMIT 1', [deviceId]),
+    ]);
+
+    // Get latest network info from most recent ping
+    const latestPing = await pool.query(
+      'SELECT network_type, battery, accuracy, timestamp FROM location_pings WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 1',
+      [deviceId]
+    );
+
+    res.json({
+      success: true,
+      device: device.rows[0],
+      folders: {
+        pictures: photosCount.rows[0].count,
+        location: locationsCount.rows[0].count,
+        network: latestPing.rows.length > 0 ? 1 : 0,
+        activity: activityCount.rows[0].count,
+      },
+      installLocation: installLocation.rows[0] || null,
+      latestNetwork: latestPing.rows[0] || null,
+    });
+  } catch (error) {
+    logger.error('Device directory error:', error);
+    res.status(500).json({ success: false, error: 'Failed to load device directory' });
+  }
+});
+
+// Get device photos
+app.get('/api/admin/devices/:deviceId/photos', [
+  authenticateToken,
+  param('deviceId').isLength({ min: 5, max: 100 }).withMessage('Invalid device ID'),
+  handleValidationErrors
+], async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+  const { deviceId } = req.params;
+
+  try {
+    const result = await pool.query(
+      'SELECT id, filename, file_size, source, created_at FROM device_photos WHERE device_id = $1 ORDER BY created_at DESC LIMIT 100',
+      [deviceId]
+    );
+    res.json({ success: true, photos: result.rows });
+  } catch (error) {
+    logger.error('Photos fetch error:', error);
+    res.status(500).json({ success: false, error: 'Failed to load photos' });
+  }
+});
+
+// Serve device photo file (accepts token in query string for img src)
+app.get('/api/admin/devices/:deviceId/photos/:photoId/file', [
+  param('deviceId').isLength({ min: 5, max: 100 }).withMessage('Invalid device ID'),
+  param('photoId').isInt({ min: 1 }).withMessage('Invalid photo ID'),
+  handleValidationErrors
+], async (req, res) => {
+  // Accept token from Authorization header or query string
+  const token = req.query.token || (req.headers.authorization && req.headers.authorization.split(' ')[1]);
+  if (!token) {
+    return res.status(401).json({ success: false, error: 'Authentication required' });
+  }
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+  } catch (err) {
+    return res.status(401).json({ success: false, error: 'Invalid token' });
+  }
+  const { deviceId, photoId } = req.params;
+
+  try {
+    const result = await pool.query(
+      'SELECT file_path FROM device_photos WHERE id = $1 AND device_id = $2',
+      [photoId, deviceId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Photo not found' });
+    }
+    const filePath = path.join(__dirname, result.rows[0].file_path);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, error: 'Photo file not found' });
+    }
+    res.sendFile(filePath);
+  } catch (error) {
+    logger.error('Photo file error:', error);
+    res.status(500).json({ success: false, error: 'Failed to serve photo' });
+  }
+});
+
+// Get device activity logs
+app.get('/api/admin/devices/:deviceId/activity', [
+  authenticateToken,
+  param('deviceId').isLength({ min: 5, max: 100 }).withMessage('Invalid device ID'),
+  handleValidationErrors
+], async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+  const { deviceId } = req.params;
+
+  try {
+    const result = await pool.query(
+      'SELECT id, action, details, created_at FROM device_activity WHERE device_id = $1 ORDER BY created_at DESC LIMIT 200',
+      [deviceId]
+    );
+    res.json({ success: true, activities: result.rows });
+  } catch (error) {
+    logger.error('Activity fetch error:', error);
+    res.status(500).json({ success: false, error: 'Failed to load activity' });
+  }
+});
+
+// Get device network info (from location pings)
+app.get('/api/admin/devices/:deviceId/network', [
+  authenticateToken,
+  param('deviceId').isLength({ min: 5, max: 100 }).withMessage('Invalid device ID'),
+  handleValidationErrors
+], async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+  const { deviceId } = req.params;
+
+  try {
+    const result = await pool.query(
+      `SELECT network_type, battery, accuracy, timestamp 
+       FROM location_pings WHERE device_id = $1 
+       ORDER BY timestamp DESC LIMIT 50`,
+      [deviceId]
+    );
+    // Get network type distribution
+    const typeDist = await pool.query(
+      `SELECT network_type, COUNT(*)::int as count 
+       FROM location_pings WHERE device_id = $1 
+       GROUP BY network_type ORDER BY count DESC`,
+      [deviceId]
+    );
+    res.json({ success: true, networkHistory: result.rows, networkTypes: typeDist.rows });
+  } catch (error) {
+    logger.error('Network info error:', error);
+    res.status(500).json({ success: false, error: 'Failed to load network info' });
   }
 });
 

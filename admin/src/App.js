@@ -1,16 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   AppBar, Toolbar, Typography, Container, Grid, Card, CardContent,
   Button, Dialog, DialogTitle, DialogContent, DialogActions,
   TextField, Table, TableBody, TableCell, TableContainer, TableHead,
   TableRow, Paper, Chip, IconButton, Alert, Snackbar, Tabs, Tab,
-  Box, List, ListItem, ListItemText, Divider
+  Box, List, ListItem, ListItemText, ListItemIcon, Divider, Breadcrumbs, Link,
+  CircularProgress, ImageList, ImageListItem, Badge
 } from '@mui/material';
 import {
   Map as MapIcon, LocationOn, Security, CameraAlt,
   Alarm, GpsFixed, BatteryFull, NetworkCheck, Analytics,
   Devices, Timeline, Notifications, People, Delete,
-  PlayArrow, Stop
+  PlayArrow, Stop, Folder, FolderOpen, Photo, History,
+  Wifi, SignalCellularAlt, ArrowBack, Info
 } from '@mui/icons-material';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
@@ -399,6 +401,7 @@ function AdminDashboard() {
         <TabPanel value={tabValue} index={0}>
           <DevicesTab
             devices={devices}
+            authToken={authToken}
             onViewLocations={viewLocations}
             onMarkAsLost={markAsLost}
             onSendCommand={sendCommand}
@@ -544,8 +547,14 @@ function TabPanel(props) {
   );
 }
 
-// Devices Tab Component
-function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand, onActivate, onDeactivate, onResetDevice }) {
+// Devices Tab Component with Directory View
+function DevicesTab({ devices, authToken, onViewLocations, onMarkAsLost, onSendCommand, onActivate, onDeactivate, onResetDevice }) {
+  const [selectedDeviceId, setSelectedDeviceId] = useState(null);
+  const [deviceDir, setDeviceDir] = useState(null);
+  const [openFolder, setOpenFolder] = useState(null); // 'pictures' | 'location' | 'network' | 'activity'
+  const [folderData, setFolderData] = useState(null);
+  const [loading, setLoading] = useState(false);
+
   const getStatusColor = (status) => {
     switch (status) {
       case 'active': return 'error';
@@ -556,6 +565,385 @@ function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand, onA
     }
   };
 
+  const openDeviceDirectory = async (deviceId) => {
+    setLoading(true);
+    setSelectedDeviceId(deviceId);
+    setOpenFolder(null);
+    setFolderData(null);
+    try {
+      const response = await fetch(`${API_BASE}/admin/devices/${encodeURIComponent(deviceId)}/directory`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      const data = await response.json();
+      if (data.success) {
+        setDeviceDir(data);
+      }
+    } catch (error) {
+      console.error('Failed to load device directory:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const openFolderContent = async (folder) => {
+    setLoading(true);
+    setOpenFolder(folder);
+    try {
+      let endpoint = '';
+      if (folder === 'pictures') endpoint = 'photos';
+      else if (folder === 'location') endpoint = 'locations';
+      else if (folder === 'network') endpoint = 'network';
+      else if (folder === 'activity') endpoint = 'activity';
+
+      const response = await fetch(`${API_BASE}/admin/devices/${encodeURIComponent(selectedDeviceId)}/${endpoint}`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      const data = await response.json();
+      if (data.success) {
+        setFolderData(data);
+      }
+    } catch (error) {
+      console.error(`Failed to load ${folder}:`, error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const goBack = () => {
+    if (openFolder) {
+      setOpenFolder(null);
+      setFolderData(null);
+    } else {
+      setSelectedDeviceId(null);
+      setDeviceDir(null);
+    }
+  };
+
+  // Folder content views
+  const renderFolderContent = () => {
+    if (!folderData) return <CircularProgress />;
+
+    if (openFolder === 'pictures') {
+      const photos = folderData.photos || [];
+      return (
+        <Box>
+          <Typography variant="h6" gutterBottom>📸 Pictures ({photos.length})</Typography>
+          {photos.length === 0 ? (
+            <Typography color="textSecondary">No photos captured yet. Use the camera command to capture photos.</Typography>
+          ) : (
+            <Grid container spacing={2}>
+              {photos.map((photo) => (
+                <Grid item xs={6} md={4} lg={3} key={photo.id}>
+                  <Card>
+                    <Box sx={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: '#f0f0f0' }}>
+                      <img
+                        src={`${API_BASE}/admin/devices/${encodeURIComponent(selectedDeviceId)}/photos/${photo.id}/file?token=${authToken}`}
+                        alt={photo.filename}
+                        style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                        onError={(e) => { e.target.src = ''; e.target.alt = 'Failed to load'; }}
+                      />
+                    </Box>
+                    <CardContent sx={{ py: 1 }}>
+                      <Typography variant="caption" display="block">{format(new Date(photo.created_at), 'MMM dd, yyyy HH:mm')}</Typography>
+                      <Typography variant="caption" color="textSecondary">{(photo.file_size / 1024).toFixed(1)} KB</Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              ))}
+            </Grid>
+          )}
+        </Box>
+      );
+    }
+
+    if (openFolder === 'location') {
+      const locations = folderData.locations || [];
+      return (
+        <Box>
+          <Typography variant="h6" gutterBottom>📍 Location History ({locations.length})</Typography>
+          {locations.length === 0 ? (
+            <Typography color="textSecondary">No location data yet. Activate the device to start tracking.</Typography>
+          ) : (
+            <>
+              <Box sx={{ height: 350, mb: 2 }}>
+                <MapContainer
+                  center={[locations[0].latitude, locations[0].longitude]}
+                  zoom={13}
+                  style={{ height: '100%', width: '100%', borderRadius: 8 }}
+                >
+                  <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
+                  {locations.map((loc, i) => (
+                    <Marker key={i} position={[loc.latitude, loc.longitude]}>
+                      <Popup>
+                        {format(new Date(loc.timestamp), 'MMM dd, HH:mm:ss')}<br/>
+                        Battery: {loc.battery}% | Net: {loc.network_type}
+                      </Popup>
+                    </Marker>
+                  ))}
+                </MapContainer>
+              </Box>
+              <TableContainer component={Paper} sx={{ maxHeight: 300 }}>
+                <Table size="small" stickyHeader>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Time</TableCell>
+                      <TableCell>Latitude</TableCell>
+                      <TableCell>Longitude</TableCell>
+                      <TableCell>Battery</TableCell>
+                      <TableCell>Network</TableCell>
+                      <TableCell>Accuracy</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {locations.map((loc, i) => (
+                      <TableRow key={i}>
+                        <TableCell>{format(new Date(loc.timestamp), 'MMM dd, HH:mm:ss')}</TableCell>
+                        <TableCell>{Number(loc.latitude).toFixed(6)}</TableCell>
+                        <TableCell>{Number(loc.longitude).toFixed(6)}</TableCell>
+                        <TableCell>{loc.battery}%</TableCell>
+                        <TableCell>{loc.network_type}</TableCell>
+                        <TableCell>{loc.accuracy}m</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </>
+          )}
+        </Box>
+      );
+    }
+
+    if (openFolder === 'network') {
+      const history = folderData.networkHistory || [];
+      const types = folderData.networkTypes || [];
+      return (
+        <Box>
+          <Typography variant="h6" gutterBottom>🌐 Network Info</Typography>
+          {history.length === 0 ? (
+            <Typography color="textSecondary">No network data available yet.</Typography>
+          ) : (
+            <Grid container spacing={2}>
+              <Grid item xs={12} md={6}>
+                <Card>
+                  <CardContent>
+                    <Typography variant="subtitle1" gutterBottom>Current</Typography>
+                    <Box sx={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                      <Box>
+                        <Typography variant="caption" color="textSecondary">Network Type</Typography>
+                        <Typography variant="h6">{history[0].network_type}</Typography>
+                      </Box>
+                      <Box>
+                        <Typography variant="caption" color="textSecondary">Battery</Typography>
+                        <Typography variant="h6">{history[0].battery}%</Typography>
+                      </Box>
+                      <Box>
+                        <Typography variant="caption" color="textSecondary">Last Seen</Typography>
+                        <Typography variant="h6">{format(new Date(history[0].timestamp), 'HH:mm:ss')}</Typography>
+                      </Box>
+                    </Box>
+                  </CardContent>
+                </Card>
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <Card>
+                  <CardContent>
+                    <Typography variant="subtitle1" gutterBottom>Network Distribution</Typography>
+                    {types.map((t) => (
+                      <Box key={t.network_type} sx={{ display: 'flex', justifyContent: 'space-between', py: 0.5 }}>
+                        <Chip label={t.network_type} size="small" icon={t.network_type === 'wifi' ? <Wifi /> : <SignalCellularAlt />} />
+                        <Typography>{t.count} pings</Typography>
+                      </Box>
+                    ))}
+                  </CardContent>
+                </Card>
+              </Grid>
+              <Grid item xs={12}>
+                <TableContainer component={Paper} sx={{ maxHeight: 300 }}>
+                  <Table size="small" stickyHeader>
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Time</TableCell>
+                        <TableCell>Network</TableCell>
+                        <TableCell>Battery</TableCell>
+                        <TableCell>Accuracy</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {history.map((h, i) => (
+                        <TableRow key={i}>
+                          <TableCell>{format(new Date(h.timestamp), 'MMM dd, HH:mm:ss')}</TableCell>
+                          <TableCell>{h.network_type}</TableCell>
+                          <TableCell>{h.battery}%</TableCell>
+                          <TableCell>{h.accuracy}m</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </Grid>
+            </Grid>
+          )}
+        </Box>
+      );
+    }
+
+    if (openFolder === 'activity') {
+      const activities = folderData.activities || [];
+      return (
+        <Box>
+          <Typography variant="h6" gutterBottom>📋 Activity Logs ({activities.length})</Typography>
+          {activities.length === 0 ? (
+            <Typography color="textSecondary">No activity logged yet.</Typography>
+          ) : (
+            <TableContainer component={Paper} sx={{ maxHeight: 500 }}>
+              <Table size="small" stickyHeader>
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Time</TableCell>
+                    <TableCell>Action</TableCell>
+                    <TableCell>Details</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {activities.map((a) => (
+                    <TableRow key={a.id}>
+                      <TableCell>{format(new Date(a.created_at), 'MMM dd, yyyy HH:mm:ss')}</TableCell>
+                      <TableCell>
+                        <Chip label={a.action} size="small" variant="outlined" />
+                      </TableCell>
+                      <TableCell sx={{ maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {a.details || '—'}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          )}
+        </Box>
+      );
+    }
+  };
+
+  // Device Directory View
+  if (selectedDeviceId && deviceDir) {
+    const { device, folders, installLocation } = deviceDir;
+    const folderConfig = [
+      { key: 'pictures', label: 'Pictures', icon: '📸', subtitle: 'Photos & Images', count: folders.pictures, color: '#e3f2fd' },
+      { key: 'location', label: 'Location', icon: '📍', subtitle: 'GPS Data', count: folders.location, color: '#e8f5e9' },
+      { key: 'network', label: 'Network', icon: '🌐', subtitle: 'Network Info', count: folders.network, color: '#fff3e0' },
+      { key: 'activity', label: 'Activity', icon: '📋', subtitle: 'Logs & Info', count: folders.activity, color: '#fce4ec' },
+    ];
+
+    return (
+      <Card>
+        <CardContent>
+          {/* Breadcrumb navigation */}
+          <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+            <IconButton onClick={goBack} sx={{ mr: 1 }}>
+              <ArrowBack />
+            </IconButton>
+            <Breadcrumbs>
+              <Link component="button" underline="hover" onClick={() => { setSelectedDeviceId(null); setDeviceDir(null); }}>
+                Devices
+              </Link>
+              <Link component="button" underline="hover" onClick={() => { setOpenFolder(null); setFolderData(null); }}>
+                {device.model} ({device.id.substring(0, 12)}...)
+              </Link>
+              {openFolder && <Typography color="text.primary">{openFolder.charAt(0).toUpperCase() + openFolder.slice(1)}</Typography>}
+            </Breadcrumbs>
+          </Box>
+
+          {/* Folder content or folder grid */}
+          {openFolder ? (
+            loading ? <Box sx={{ textAlign: 'center', py: 4 }}><CircularProgress /></Box> : renderFolderContent()
+          ) : (
+            <>
+              {/* Device header info */}
+              <Box sx={{ mb: 3, p: 2, bgcolor: '#f5f5f5', borderRadius: 2 }}>
+                <Grid container spacing={2} alignItems="center">
+                  <Grid item xs={12} md={6}>
+                    <Typography variant="h6">{device.model}</Typography>
+                    <Typography variant="body2" color="textSecondary">OS: {device.os}</Typography>
+                    <Typography variant="body2" color="textSecondary">Member: {device.member_id}</Typography>
+                    <Typography variant="body2" color="textSecondary">Registered: {format(new Date(device.created_at), 'MMM dd, yyyy HH:mm')}</Typography>
+                    <Box sx={{ mt: 1 }}>
+                      <Chip label={device.status} color={getStatusColor(device.status)} size="small" />
+                    </Box>
+                  </Grid>
+                  <Grid item xs={12} md={6}>
+                    {installLocation && (
+                      <Box>
+                        <Typography variant="subtitle2" color="textSecondary">📍 Install Location</Typography>
+                        <Typography variant="body2">
+                          {Number(installLocation.latitude).toFixed(6)}, {Number(installLocation.longitude).toFixed(6)}
+                        </Typography>
+                        <Typography variant="caption" color="textSecondary">
+                          {format(new Date(installLocation.timestamp), 'MMM dd, yyyy HH:mm:ss')}
+                        </Typography>
+                      </Box>
+                    )}
+                  </Grid>
+                </Grid>
+                {/* Action buttons */}
+                <Box sx={{ mt: 2, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                  {device.status !== 'active' && (
+                    <Button size="small" variant="outlined" color="error" startIcon={<GpsFixed />} onClick={() => onMarkAsLost(device.id)}>
+                      Mark as Lost
+                    </Button>
+                  )}
+                  {device.status === 'active' && (
+                    <Button size="small" variant="outlined" color="warning" startIcon={<Stop />} onClick={() => onDeactivate(device.id)}>
+                      Deactivate
+                    </Button>
+                  )}
+                  <Button size="small" variant="outlined" color="warning" startIcon={<Alarm />} onClick={() => onSendCommand(device.id, 'alarm')} disabled={device.status !== 'active'}>
+                    Alarm
+                  </Button>
+                  <Button size="small" variant="outlined" color="info" startIcon={<CameraAlt />} onClick={() => onSendCommand(device.id, 'camera')} disabled={device.status !== 'active'}>
+                    Camera
+                  </Button>
+                  <Button size="small" variant="outlined" color="error" startIcon={<Delete />} onClick={() => onResetDevice(device.id, device.member_id)}>
+                    Delete
+                  </Button>
+                </Box>
+              </Box>
+
+              {/* Folder grid */}
+              <Typography variant="subtitle1" sx={{ mb: 2, fontWeight: 600 }}>Device Directory</Typography>
+              <Grid container spacing={2}>
+                {folderConfig.map((f) => (
+                  <Grid item xs={6} md={3} key={f.key}>
+                    <Card
+                      sx={{
+                        cursor: 'pointer',
+                        transition: 'all 0.2s',
+                        bgcolor: f.color,
+                        '&:hover': { transform: 'translateY(-4px)', boxShadow: 4 },
+                      }}
+                      onClick={() => openFolderContent(f.key)}
+                    >
+                      <CardContent sx={{ textAlign: 'center', py: 3 }}>
+                        <Typography sx={{ fontSize: 48, mb: 1 }}>{f.icon}</Typography>
+                        <Typography variant="h6" sx={{ fontWeight: 600 }}>{f.label}</Typography>
+                        <Typography variant="body2" color="textSecondary">{f.subtitle}</Typography>
+                        <Badge badgeContent={f.count} color="primary" sx={{ mt: 1 }}>
+                          <Chip label={`${f.count} items`} size="small" variant="outlined" />
+                        </Badge>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                ))}
+              </Grid>
+            </>
+          )}
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // Device list view (default)
   return (
     <Card>
       <CardContent>
@@ -585,8 +973,18 @@ function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand, onA
             </TableHead>
             <TableBody>
               {devices.map((device) => (
-                <TableRow key={device.id}>
-                  <TableCell>{device.id.substring(0, 12)}...</TableCell>
+                <TableRow
+                  key={device.id}
+                  hover
+                  sx={{ cursor: 'pointer' }}
+                  onClick={() => openDeviceDirectory(device.id)}
+                >
+                  <TableCell>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <Folder color="primary" fontSize="small" />
+                      {device.id.substring(0, 12)}...
+                    </Box>
+                  </TableCell>
                   <TableCell>{device.model}</TableCell>
                   <TableCell>{device.os}</TableCell>
                   <TableCell>{device.member_id || '—'}</TableCell>
@@ -601,34 +999,15 @@ function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand, onA
                   <TableCell>
                     <IconButton
                       size="small"
-                      onClick={() => onViewLocations(device.id)}
-                      color="primary"
-                      title="View Locations"
+                      onClick={(e) => { e.stopPropagation(); onMarkAsLost(device.id); }}
+                      color="error"
+                      title="Mark as Lost"
                     >
-                      <MapIcon />
+                      <GpsFixed />
                     </IconButton>
-                    {device.status === 'active' ? (
-                      <IconButton
-                        size="small"
-                        onClick={() => onDeactivate(device.id)}
-                        color="warning"
-                        title="Deactivate"
-                      >
-                        <Stop />
-                      </IconButton>
-                    ) : (
-                      <IconButton
-                        size="small"
-                        onClick={() => onMarkAsLost(device.id)}
-                        color="error"
-                        title="Mark as Lost"
-                      >
-                        <GpsFixed />
-                      </IconButton>
-                    )}
                     <IconButton
                       size="small"
-                      onClick={() => onSendCommand(device.id, 'alarm')}
+                      onClick={(e) => { e.stopPropagation(); onSendCommand(device.id, 'alarm'); }}
                       color="warning"
                       title="Trigger Alarm"
                       disabled={device.status !== 'active'}
@@ -637,7 +1016,7 @@ function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand, onA
                     </IconButton>
                     <IconButton
                       size="small"
-                      onClick={() => onSendCommand(device.id, 'camera')}
+                      onClick={(e) => { e.stopPropagation(); onSendCommand(device.id, 'camera'); }}
                       color="info"
                       title="Take Photo"
                       disabled={device.status !== 'active'}
@@ -646,7 +1025,7 @@ function DevicesTab({ devices, onViewLocations, onMarkAsLost, onSendCommand, onA
                     </IconButton>
                     <IconButton
                       size="small"
-                      onClick={() => onResetDevice(device.id, device.member_id)}
+                      onClick={(e) => { e.stopPropagation(); onResetDevice(device.id, device.member_id); }}
                       color="error"
                       title="Reset / Uninstall Device"
                     >
