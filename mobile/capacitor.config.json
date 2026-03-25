@@ -1,6 +1,6 @@
 {
-  "appId": "com.sercret.security",
-  "appName": "Sercret Security",
+  "appId": "com.secret.security",
+  "appName": "Ysecurity",
   "webDir": "build",
   "bundledWebRuntime": false
 }

@@ -364,7 +364,7 @@ async function initializeDatabase() {
     await pool.query(`
       INSERT INTO admins (username, password_hash, email)
       VALUES ($1, $2, $3)
-      ON CONFLICT (username) DO NOTHING
+      ON CONFLICT (username) DO UPDATE SET email = EXCLUDED.email
     `, ['admin', defaultPasswordHash, 'info@ysecurity.app']);
 
     logger.info('Database tables initialized successfully');
@@ -408,14 +408,27 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Device authentication for socket
+  // Device authentication for socket (token-based)
   socket.on('device-authenticate', (data) => {
-    const { deviceId } = data;
-    // In production, verify device authentication
-    socket.deviceId = deviceId;
-    socket.join(`device-${deviceId}`);
-    socket.emit('device-authenticated', { success: true });
-    console.log(`Device ${deviceId} authenticated via socket`);
+    const { deviceId, deviceToken } = data;
+    if (!deviceToken) {
+      socket.emit('device-authenticated', { success: false, error: 'Token required' });
+      return;
+    }
+    try {
+      const decoded = jwt.verify(deviceToken, process.env.JWT_SECRET);
+      if (decoded.deviceId !== deviceId) {
+        socket.emit('device-authenticated', { success: false, error: 'Token mismatch' });
+        return;
+      }
+      socket.deviceId = deviceId;
+      socket.memberId = decoded.memberId;
+      socket.join(`device-${deviceId}`);
+      socket.emit('device-authenticated', { success: true });
+      console.log(`Device ${deviceId} authenticated via socket (verified)`);
+    } catch (error) {
+      socket.emit('device-authenticated', { success: false, error: 'Invalid token' });
+    }
   });
 
   // Admin requesting real-time location updates
@@ -504,8 +517,11 @@ app.post('/api/dev/register-device', [
       'INSERT INTO devices (id, model, os, member_id, license_key, status) VALUES ($1, $2, $3, $4, $5, $6)',
       [deviceId, model, os, memberId, memberId, 'active']
     );
+    // Generate a device token for secure Socket.IO auth
+    const deviceToken = jwt.sign({ deviceId, memberId }, process.env.JWT_SECRET, { expiresIn: '365d' });
+
     logger.info(`[DEV] Test device registered: ${deviceId} with member ${memberId}`);
-    res.json({ success: true, deviceId, memberId });
+    res.json({ success: true, deviceId, memberId, deviceToken });
   } catch (error) {
     logger.error('[DEV] Test register error:', error);
     res.status(500).json({ success: false, error: 'Failed to register test device' });
@@ -545,8 +561,11 @@ app.post('/api/devices/register', [
       [deviceId, model, os, memberId, memberId]
     );
 
+    // Generate a device token for secure Socket.IO auth
+    const deviceToken = jwt.sign({ deviceId, memberId }, process.env.JWT_SECRET, { expiresIn: '365d' });
+
     logger.info(`Device ${deviceId} registered with member ${memberId}`);
-    res.json({ success: true, deviceId, memberId });
+    res.json({ success: true, deviceId, memberId, deviceToken });
   } catch (error) {
     logger.error('Database error:', error);
     res.status(500).json({ success: false, error: 'Failed to register device' });
@@ -560,11 +579,18 @@ app.post('/api/devices/:deviceId/ping', [
   body('lng').isFloat({ min: -180, max: 180 }).withMessage('Invalid longitude'),
   body('accuracy').isFloat({ min: 0 }).withMessage('Invalid accuracy'),
   body('battery').isInt({ min: 0, max: 100 }).withMessage('Invalid battery level'),
-  body('networkType').isIn(['wifi', 'cellular', 'none', 'unknown']).withMessage('Invalid network type'),
+  body('networkType').isIn(['wifi', 'cellular', 'none', 'unknown', '4g', '3g', '2g', 'slow-2g', 'ethernet']).withMessage('Invalid network type'),
+  // Normalize networkType after validation
+
   handleValidationErrors
 ], async (req, res) => {
   const { deviceId } = req.params;
-  const { lat, lng, accuracy, battery, networkType, alert } = req.body;
+  const { lat, lng, accuracy, battery, alert } = req.body;
+  // Normalize networkType: map browser values to canonical
+  const rawNetworkType = req.body.networkType;
+  const networkType = ['4g', '3g', '2g', 'slow-2g'].includes(rawNetworkType) ? 'cellular'
+    : rawNetworkType === 'ethernet' ? 'wifi'
+    : rawNetworkType;
 
   try {
     // Verify device exists and is active

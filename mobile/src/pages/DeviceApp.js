@@ -187,6 +187,7 @@ function App() {
       await store.set('registration', JSON.stringify({
         deviceId: id,
         memberId: memberIdTrimmed,
+        deviceToken: data.deviceToken,
         registeredAt: new Date().toISOString(),
       }));
 
@@ -241,6 +242,7 @@ function App() {
       await store.set('registration', JSON.stringify({
         deviceId: id,
         memberId: data.memberId,
+        deviceToken: data.deviceToken,
         registeredAt: new Date().toISOString(),
         testMode: true,
       }));
@@ -266,14 +268,19 @@ function App() {
   // =============================================
   // SOCKET.IO CONNECTION
   // =============================================
-  const initSocket = (id) => {
+  const initSocket = async (id) => {
+    // Retrieve stored device token for authenticated Socket.IO
+    const registration = await store.get('registration');
+    const regData = registration ? JSON.parse(registration) : {};
+    const deviceToken = regData.deviceToken || null;
+
     const socketConnection = io(API_BASE.replace('/api', ''), {
       transports: ['websocket', 'polling'],
     });
 
     socketConnection.on('connect', () => {
       setIsConnected(true);
-      socketConnection.emit('device-authenticate', { deviceId: id });
+      socketConnection.emit('device-authenticate', { deviceId: id, deviceToken });
     });
 
     socketConnection.on('disconnect', () => {
@@ -380,7 +387,13 @@ function App() {
             lng: pos.coords.longitude,
             accuracy: pos.coords.accuracy,
             battery: batteryLevel,
-            networkType: navigator.connection?.effectiveType || 'unknown',
+            networkType: (() => {
+              const ct = navigator.connection?.type;
+              if (ct === 'wifi') return 'wifi';
+              if (ct === 'cellular' || ct === 'mobile') return 'cellular';
+              if (ct === 'none') return 'none';
+              return 'unknown';
+            })(),
           };
           if (geofence) {
             const dist = getDistance(pos.coords.latitude, pos.coords.longitude, geofence.lat, geofence.lng);
@@ -494,10 +507,12 @@ function App() {
       }
 
       // Mark command as executed
-      await fetch(`${API_BASE}/commands/${cmd.id}/executed`, {
-        method: 'POST',
-        headers: { 'X-Device-ID': deviceId },
-      }).catch(() => {});
+      if (cmd.id) {
+        await fetch(`${API_BASE}/commands/${cmd.id}/executed`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Device-ID': deviceId },
+        }).catch((err) => console.error('Failed to mark command executed:', err));
+      }
     } catch (err) {
       console.error('Command execution failed:', err);
     }
