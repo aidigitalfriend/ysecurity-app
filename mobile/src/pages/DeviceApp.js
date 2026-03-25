@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
 import io from 'socket.io-client';
 
+const DEFAULT_MEMBER_ID = 'YS-1301500118996';
+
 const API_BASE = process.env.REACT_APP_API_BASE_URL || 'https://ysecurity.app/api';
 
 // Detect if running in native Capacitor
@@ -155,8 +157,8 @@ function App() {
 
     // Validate Member ID format
     const memberIdTrimmed = memberId.trim().toUpperCase();
-    if (!/^YS-\d{6}$/.test(memberIdTrimmed)) {
-      setError('Invalid Member ID format. Must be YS-XXXXXX (e.g., YS-123456)');
+    if (!/^YS-\d{6,15}$/.test(memberIdTrimmed)) {
+      setError('Invalid Member ID format. Must be YS-XXXXXX');
       return;
     }
 
@@ -209,7 +211,7 @@ function App() {
     }
   };
 
-  // Quick test mode - auto registers without Member ID
+  // Quick install - auto registers with default admin Member ID
   const handleTestMode = async () => {
     setError(null);
     setIsLoggingIn(true);
@@ -221,13 +223,14 @@ function App() {
         localStorage.setItem('ys_device_id', id);
       }
 
-      const response = await fetch(`${API_BASE}/dev/register-device`, {
+      const response = await fetch(`${API_BASE}/devices/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           deviceId: id,
           model: info.model || 'Unknown',
           os: `${info.operatingSystem || 'Unknown'} ${info.osVersion || ''}`.trim(),
+          memberId: DEFAULT_MEMBER_ID,
         })
       });
 
@@ -238,10 +241,10 @@ function App() {
 
       const data = await response.json();
 
-      setMemberId(data.memberId);
+      setMemberId(data.memberId || DEFAULT_MEMBER_ID);
       await store.set('registration', JSON.stringify({
         deviceId: id,
-        memberId: data.memberId,
+        memberId: data.memberId || DEFAULT_MEMBER_ID,
         deviceToken: data.deviceToken,
         registeredAt: new Date().toISOString(),
         testMode: true,

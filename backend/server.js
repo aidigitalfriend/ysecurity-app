@@ -367,6 +367,13 @@ async function initializeDatabase() {
       ON CONFLICT (username) DO UPDATE SET email = EXCLUDED.email
     `, ['admin', defaultPasswordHash, 'info@ysecurity.app']);
 
+    // Create default admin member (VAT: 1301500118996) for testing
+    await pool.query(`
+      INSERT INTO members (member_id, email, payment_status, name)
+      VALUES ($1, $2, 'completed', 'Ysecurity Admin')
+      ON CONFLICT (member_id) DO NOTHING
+    `, ['YS-1301500118996', 'info@ysecurity.app']);
+
     logger.info('Database tables initialized successfully');
   } catch (error) {
     logger.error('Error initializing database:', error);
@@ -532,7 +539,7 @@ app.post('/api/devices/register', [
   body('deviceId').isLength({ min: 10, max: 100 }).withMessage('Device ID must be 10-100 characters'),
   body('model').isLength({ min: 1, max: 100 }).withMessage('Model is required'),
   body('os').isLength({ min: 1, max: 100 }).withMessage('OS is required'),
-  body('memberId').matches(/^YS-\d{6}$/).withMessage('Valid Member ID required (format: YS-XXXXXX)'),
+  body('memberId').matches(/^YS-\d{6,15}$/).withMessage('Valid Member ID required (format: YS-XXXXXX)'),
   handleValidationErrors
 ], async (req, res) => {
   const { deviceId, model, os, memberId } = req.body;
@@ -550,10 +557,12 @@ app.post('/api/devices/register', [
       return res.status(403).json({ success: false, error: 'Membership payment not completed' });
     }
 
-    // Check if this member already has a device registered
-    const existingDevice = await pool.query('SELECT id FROM devices WHERE member_id = $1', [memberId]);
+    // Check if this device is already registered
+    const existingDevice = await pool.query('SELECT id FROM devices WHERE id = $1', [deviceId]);
     if (existingDevice.rows.length > 0) {
-      return res.status(400).json({ success: false, error: 'This Member ID is already linked to a device. Contact support if you need to reinstall.' });
+      // Device already registered, return existing info
+      const deviceToken = jwt.sign({ deviceId, memberId }, process.env.JWT_SECRET, { expiresIn: '365d' });
+      return res.json({ success: true, deviceId, memberId, deviceToken });
     }
 
     await pool.query(
@@ -1403,7 +1412,7 @@ app.get('/api/admin/members', authenticateToken, async (req, res) => {
 // Activate device by Member ID (admin) - user must provide their Member ID to admin
 app.post('/api/admin/devices/activate', [
   authenticateToken,
-  body('memberId').matches(/^YS-\d{6}$/).withMessage('Valid Member ID required (format: YS-XXXXXX)'),
+  body('memberId').matches(/^YS-\d{6,15}$/).withMessage('Valid Member ID required (format: YS-XXXXXX)'),
   handleValidationErrors
 ], async (req, res) => {
   if (req.user.role !== 'admin') {
@@ -1440,7 +1449,7 @@ app.post('/api/admin/devices/activate', [
 // Deactivate device by Member ID (admin)
 app.post('/api/admin/devices/deactivate', [
   authenticateToken,
-  body('memberId').matches(/^YS-\d{6}$/).withMessage('Valid Member ID required (format: YS-XXXXXX)'),
+  body('memberId').matches(/^YS-\d{6,15}$/).withMessage('Valid Member ID required (format: YS-XXXXXX)'),
   handleValidationErrors
 ], async (req, res) => {
   if (req.user.role !== 'admin') {
@@ -1495,7 +1504,7 @@ app.delete('/api/admin/devices/:deviceId', [
 // Delete member and their device (admin) - for when user loses their ID
 app.delete('/api/admin/members/:memberId', [
   authenticateToken,
-  param('memberId').matches(/^YS-\d{6}$/).withMessage('Valid Member ID required'),
+  param('memberId').matches(/^YS-\d{6,15}$/).withMessage('Valid Member ID required'),
   handleValidationErrors
 ], async (req, res) => {
   if (req.user.role !== 'admin') {
