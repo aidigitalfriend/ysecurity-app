@@ -222,13 +222,20 @@ function AdminDashboard() {
 
   const deactivateDevice = async (deviceId) => {
     try {
+      // Find member_id for this device
+      const device = devices.find(d => d.id === deviceId);
+      const memberId = device?.member_id;
+      if (!memberId) {
+        showAlert('Cannot deactivate: member ID not found', 'error');
+        return;
+      }
       const response = await fetch(`${API_BASE}/admin/devices/deactivate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${authToken}`
         },
-        body: JSON.stringify({ deviceId })
+        body: JSON.stringify({ memberId })
       });
       const data = await response.json();
       if (data.success) {
@@ -910,7 +917,7 @@ function DevicesTab({ devices, authToken, onViewLocations, onMarkAsLost, onSendC
                       Activate Device
                     </Button>
                   )}
-                  {device.status !== 'active' && (
+                  {device.status === 'active' && (
                     <Button size="small" variant="outlined" color="error" startIcon={<GpsFixed />} onClick={() => onMarkAsLost(device.id)}>
                       Mark as Lost
                     </Button>
@@ -936,7 +943,7 @@ function DevicesTab({ devices, authToken, onViewLocations, onMarkAsLost, onSendC
                   >
                     Set Geofence
                   </Button>
-                  <Button size="small" variant="outlined" color="error" startIcon={<Delete />} onClick={() => onResetDevice(device.id, device.member_id)}>
+                  <Button size="small" variant="outlined" color="error" startIcon={<Delete />} onClick={() => onResetDevice(device.id, device.member_id)} disabled={device.status !== 'active'}>
                     Delete
                   </Button>
                 </Box>
@@ -1022,7 +1029,7 @@ function DevicesTab({ devices, authToken, onViewLocations, onMarkAsLost, onSendC
               )}
               {!latestLocation && (
                 <Box sx={{ mt: 3, p: 2, bgcolor: '#f5f5f5', borderRadius: 2, textAlign: 'center' }}>
-                  <Typography color="textSecondary">📍 No location data yet. Device will report its location once activated.</Typography>
+                  <Typography color="textSecondary">📍 No location data yet. Waiting for device to report its first location.</Typography>
                 </Box>
               )}
 

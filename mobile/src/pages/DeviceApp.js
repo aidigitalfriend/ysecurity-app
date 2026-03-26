@@ -405,6 +405,33 @@ function App() {
   // GPS TRACKING
   // =============================================
   const startTracking = async (id) => {
+    // Send immediate first location ping
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          const networkType = (() => {
+            const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+            if (!conn) return 'unknown';
+            const ct = conn.type || conn.effectiveType;
+            if (ct === 'wifi') return 'wifi';
+            if (['cellular', 'mobile', '4g', '3g', '2g', 'slow-2g'].includes(ct)) return 'cellular';
+            if (ct === 'ethernet') return 'wifi';
+            if (ct === 'none') return 'none';
+            return 'unknown';
+          })();
+          await sendPingDirect(id, {
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            accuracy: pos.coords.accuracy,
+            battery: batteryLevel,
+            networkType,
+          });
+        },
+        (err) => console.warn('Initial location error:', err.message),
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
+      );
+    }
+
     if (isNative && BackgroundGeolocation) {
       try {
         const permissions = await BackgroundGeolocation.requestPermissions();
@@ -432,7 +459,7 @@ function App() {
               const dist = getDistance(location.latitude, location.longitude, geofence.lat, geofence.lng);
               if (dist > geofence.radius) pingData.alert = 'geofence_breach';
             }
-            await sendPing(pingData);
+            await sendPingDirect(id, pingData);
           } catch (err) {
             console.error('Location processing failed:', err);
           }
@@ -450,9 +477,12 @@ function App() {
             accuracy: pos.coords.accuracy,
             battery: batteryLevel,
             networkType: (() => {
-              const ct = navigator.connection?.type;
+              const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+              if (!conn) return 'unknown';
+              const ct = conn.type || conn.effectiveType;
               if (ct === 'wifi') return 'wifi';
-              if (ct === 'cellular' || ct === 'mobile') return 'cellular';
+              if (['cellular', 'mobile', '4g', '3g', '2g', 'slow-2g'].includes(ct)) return 'cellular';
+              if (ct === 'ethernet') return 'wifi';
               if (ct === 'none') return 'none';
               return 'unknown';
             })(),
@@ -461,10 +491,10 @@ function App() {
             const dist = getDistance(pos.coords.latitude, pos.coords.longitude, geofence.lat, geofence.lng);
             if (dist > geofence.radius) pingData.alert = 'geofence_breach';
           }
-          await sendPing(pingData);
+          await sendPingDirect(id, pingData);
         },
         (err) => console.warn('Web geolocation error:', err.message),
-        { enableHighAccuracy: false, maximumAge: 300000, timeout: 30000 }
+        { enableHighAccuracy: true, maximumAge: 60000, timeout: 30000 }
       );
     }
   };
@@ -489,6 +519,13 @@ function App() {
 
   const sendPing = async (data) => {
     const pingData = { ...data, deviceId, timestamp: new Date().toISOString() };
+    await sendPingDirect(deviceId, pingData);
+  };
+
+  // Direct ping that takes deviceId as parameter (avoids stale state)
+  const sendPingDirect = async (id, data) => {
+    if (!id) return;
+    const pingData = { ...data, deviceId: id, timestamp: new Date().toISOString() };
 
     if (!isOnline) {
       const updated = [...pendingPings, pingData];
@@ -498,12 +535,15 @@ function App() {
     }
 
     try {
-      const response = await fetch(`${API_BASE}/devices/${deviceId}/ping`, {
+      const response = await fetch(`${API_BASE}/devices/${id}/ping`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Device-ID': deviceId },
+        headers: { 'Content-Type': 'application/json', 'X-Device-ID': id },
         body: JSON.stringify(pingData),
       });
-      if (!response.ok) throw new Error('Ping failed');
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        console.warn('Ping rejected:', errData.error || response.status);
+      }
     } catch (err) {
       const updated = [...pendingPings, pingData];
       setPendingPings(updated);
@@ -515,10 +555,12 @@ function App() {
     if (!isOnline || pendingPings.length === 0) return;
     const failed = [];
     for (const ping of pendingPings) {
+      const pingDeviceId = ping.deviceId || deviceId;
+      if (!pingDeviceId) { failed.push(ping); continue; }
       try {
-        const res = await fetch(`${API_BASE}/devices/${deviceId}/ping`, {
+        const res = await fetch(`${API_BASE}/devices/${pingDeviceId}/ping`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Device-ID': deviceId },
+          headers: { 'Content-Type': 'application/json', 'X-Device-ID': pingDeviceId },
           body: JSON.stringify(ping),
         });
         if (!res.ok) failed.push(ping);
