@@ -1,135 +1,172 @@
-const express = require('express');
-const { Pool } = require('pg');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-require('dotenv').config();
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const nodemailer = require('nodemailer');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
-const rateLimit = require('express-rate-limit');
-const helmet = require('helmet');
-const morgan = require('morgan');
-const fs = require('fs');
-const path = require('path');
-const { createServer } = require('http');
-const { Server } = require('socket.io');
-const winston = require('winston');
-const compression = require('compression');
-const crypto = require('crypto');
+const express = require("express");
+const { Pool } = require("pg");
+const cors = require("cors");
+const bodyParser = require("body-parser");
+require("dotenv").config();
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const nodemailer = require("nodemailer");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
+const rateLimit = require("express-rate-limit");
+const helmet = require("helmet");
+const morgan = require("morgan");
+const fs = require("fs");
+const path = require("path");
+const { createServer } = require("http");
+const { Server } = require("socket.io");
+const winston = require("winston");
+const compression = require("compression");
+const crypto = require("crypto");
 
 const app = express();
-app.set('trust proxy', 1);
+app.set("trust proxy", 1);
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: process.env.CORS_ORIGIN || (process.env.NODE_ENV === 'production' ? 'https://ysecurity.app' : 'http://localhost:3000'),
-    methods: ['GET', 'POST'],
-    credentials: true
-  }
+    origin:
+      process.env.CORS_ORIGIN ||
+      (process.env.NODE_ENV === "production"
+        ? "https://ysecurity.app"
+        : "http://localhost:3000"),
+    methods: ["GET", "POST"],
+    credentials: true,
+  },
 });
 
 // Winston logger setup
 const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
+  level: process.env.LOG_LEVEL || "info",
   format: winston.format.combine(
     winston.format.timestamp(),
     winston.format.errors({ stack: true }),
-    winston.format.json()
+    winston.format.json(),
   ),
-  defaultMeta: { service: 'ysecurity-app-backend' },
+  defaultMeta: { service: "ysecurity-app-backend" },
   transports: [
-    new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
-    new winston.transports.File({ filename: 'logs/combined.log' }),
+    new winston.transports.File({ filename: "logs/error.log", level: "error" }),
+    new winston.transports.File({ filename: "logs/combined.log" }),
   ],
 });
 
-if (process.env.NODE_ENV !== 'production') {
-  logger.add(new winston.transports.Console({
-    format: winston.format.simple(),
-  }));
+if (process.env.NODE_ENV !== "production") {
+  logger.add(
+    new winston.transports.Console({
+      format: winston.format.simple(),
+    }),
+  );
 }
 
 const PORT = process.env.PORT || 4000;
 
 // Security middleware
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com", "https://cdn.socket.io"],
-      scriptSrc: ["'self'", "https://unpkg.com", "https://cdn.socket.io", "https://js.stripe.com"],
-      imgSrc: ["'self'", "data:", "https:"],
-      frameSrc: ["'self'", "https://js.stripe.com"],
-      connectSrc: ["'self'", "https://api.stripe.com", "wss:", "ws:"],
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        styleSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://unpkg.com",
+          "https://cdn.socket.io",
+        ],
+        scriptSrc: [
+          "'self'",
+          "https://unpkg.com",
+          "https://cdn.socket.io",
+          "https://js.stripe.com",
+        ],
+        imgSrc: ["'self'", "data:", "https:"],
+        frameSrc: ["'self'", "https://js.stripe.com"],
+        connectSrc: ["'self'", "https://api.stripe.com", "wss:", "ws:"],
+      },
     },
-  },
-}));
+  }),
+);
 
 // Rate limiting
 const limiter = rateLimit({
   windowMs: (process.env.RATE_LIMIT_WINDOW || 15) * 60 * 1000, // 15 minutes
   max: process.env.RATE_LIMIT_MAX || 100, // limit each IP to 100 requests per windowMs
-  message: 'Too many requests from this IP, please try again later.',
+  message: "Too many requests from this IP, please try again later.",
   standardHeaders: true,
   legacyHeaders: false,
 });
 app.use(limiter);
 
 // Logging
-app.use(morgan('combined', {
-  stream: fs.createWriteStream(path.join(__dirname, 'access.log'), { flags: 'a' })
-}));
+app.use(
+  morgan("combined", {
+    stream: fs.createWriteStream(path.join(__dirname, "access.log"), {
+      flags: "a",
+    }),
+  }),
+);
 
 // Middleware
-app.use(cors({
-  origin: process.env.CORS_ORIGIN || (process.env.NODE_ENV === 'production' ? 'https://ysecurity.app' : 'http://localhost:3000'),
-  credentials: true
-}));
+app.use(
+  cors({
+    origin:
+      process.env.CORS_ORIGIN ||
+      (process.env.NODE_ENV === "production"
+        ? "https://ysecurity.app"
+        : "http://localhost:3000"),
+    credentials: true,
+  }),
+);
 // Stripe webhook needs raw body for signature verification - must be before bodyParser.json
-app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+app.post(
+  "/api/webhooks/stripe",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    const sig = req.headers["stripe-signature"];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-  if (!webhookSecret || webhookSecret === 'whsec_replace_after_creating_webhook') {
-    logger.error('Stripe webhook secret not configured');
-    return res.status(500).send('Webhook secret not configured');
-  }
+    if (
+      !webhookSecret ||
+      webhookSecret === "whsec_replace_after_creating_webhook"
+    ) {
+      logger.error("Stripe webhook secret not configured");
+      return res.status(500).send("Webhook secret not configured");
+    }
 
-  let event;
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
-  } catch (err) {
-    logger.error(`Webhook signature verification failed: ${err.message}`);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
+    let event;
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    } catch (err) {
+      logger.error(`Webhook signature verification failed: ${err.message}`);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
 
-  try {
-    switch (event.type) {
-      case 'checkout.session.completed': {
-        const session = event.data.object;
-        logger.info(`Checkout completed: ${session.id}`);
+    try {
+      switch (event.type) {
+        case "checkout.session.completed": {
+          const session = event.data.object;
+          logger.info(`Checkout completed: ${session.id}`);
 
-        // Update member payment status
-        const result = await pool.query(
-          'SELECT member_id, email, payment_status FROM members WHERE stripe_session_id = $1',
-          [session.id]
-        );
-
-        if (result.rows.length > 0 && result.rows[0].payment_status !== 'completed') {
-          const member = result.rows[0];
-          await pool.query(
-            'UPDATE members SET payment_status = $1, stripe_payment_id = $2 WHERE stripe_session_id = $3',
-            ['completed', session.payment_intent, session.id]
+          // Update member payment status
+          const result = await pool.query(
+            "SELECT member_id, email, payment_status FROM members WHERE stripe_session_id = $1",
+            [session.id],
           );
 
-          // Send Member ID email
-          try {
-            const mailOptions = {
-              from: process.env.EMAIL_USER,
-              to: member.email,
-              subject: 'Your Ysecurity Member ID',
-              html: `
+          if (
+            result.rows.length > 0 &&
+            result.rows[0].payment_status !== "completed"
+          ) {
+            const member = result.rows[0];
+            await pool.query(
+              "UPDATE members SET payment_status = $1, stripe_payment_id = $2 WHERE stripe_session_id = $3",
+              ["completed", session.payment_intent, session.id],
+            );
+
+            // Send Member ID email
+            try {
+              const mailOptions = {
+                from: process.env.EMAIL_USER,
+                to: member.email,
+                subject: "Your Ysecurity Member ID",
+                html: `
                 <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px;">
                   <h2 style="color:#1a73e8;">🛡️ Welcome to Ysecurity!</h2>
                   <p>Your membership is now active. Here is your Member ID:</p>
@@ -149,50 +186,56 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
                   <hr style="border:none;border-top:1px solid #e8eaed;margin:24px 0;">
                   <p style="color:#5f6368;font-size:0.8rem;">Ysecurity - Smart Device Security<br>https://ysecurity.app</p>
                 </div>
-              `
-            };
-            transporter.sendMail(mailOptions);
-          } catch (emailErr) {
-            logger.error('Webhook: Failed to send Member ID email:', emailErr);
-          }
+              `,
+              };
+              transporter.sendMail(mailOptions);
+            } catch (emailErr) {
+              logger.error(
+                "Webhook: Failed to send Member ID email:",
+                emailErr,
+              );
+            }
 
-          logger.info(`Member ${member.member_id} payment completed via webhook`);
+            logger.info(
+              `Member ${member.member_id} payment completed via webhook`,
+            );
+          }
+          break;
         }
-        break;
+
+        case "payment_intent.succeeded":
+          logger.info(`PaymentIntent succeeded: ${event.data.object.id}`);
+          break;
+
+        case "payment_intent.payment_failed":
+          logger.warn(`PaymentIntent failed: ${event.data.object.id}`);
+          break;
+
+        default:
+          logger.info(`Unhandled webhook event type: ${event.type}`);
       }
 
-      case 'payment_intent.succeeded':
-        logger.info(`PaymentIntent succeeded: ${event.data.object.id}`);
-        break;
-
-      case 'payment_intent.payment_failed':
-        logger.warn(`PaymentIntent failed: ${event.data.object.id}`);
-        break;
-
-      default:
-        logger.info(`Unhandled webhook event type: ${event.type}`);
+      res.json({ received: true });
+    } catch (error) {
+      logger.error("Webhook processing error:", error);
+      res.status(500).json({ error: "Webhook processing failed" });
     }
+  },
+);
 
-    res.json({ received: true });
-  } catch (error) {
-    logger.error('Webhook processing error:', error);
-    res.status(500).json({ error: 'Webhook processing failed' });
-  }
-});
-
-app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.json({ limit: "10mb" }));
 
 // Serve admin dashboard React app at /admin
-app.use('/admin', express.static(path.join(__dirname, 'admin')));
-app.get('/admin/*', (req, res) => {
-  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.sendFile(path.join(__dirname, 'admin', 'index.html'));
+app.use("/admin", express.static(path.join(__dirname, "admin")));
+app.get("/admin/*", (req, res) => {
+  res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+  res.sendFile(path.join(__dirname, "admin", "index.html"));
 });
 
-app.use(express.static('public'));
+app.use(express.static("public"));
 
-const { body, param, validationResult } = require('express-validator');
-const Joi = require('joi');
+const { body, param, validationResult } = require("express-validator");
+const Joi = require("joi");
 
 // Input validation middleware
 const handleValidationErrors = (req, res, next) => {
@@ -200,7 +243,7 @@ const handleValidationErrors = (req, res, next) => {
   if (!errors.isEmpty()) {
     return res.status(400).json({
       success: false,
-      errors: errors.array()
+      errors: errors.array(),
     });
   }
   next();
@@ -211,7 +254,7 @@ const deviceRegistrationSchema = Joi.object({
   deviceId: Joi.string().required().min(10).max(100),
   model: Joi.string().required().min(1).max(100),
   os: Joi.string().required().min(1).max(100),
-  licenseKey: Joi.string().required().min(10).max(50)
+  licenseKey: Joi.string().required().min(10).max(50),
 });
 
 const locationPingSchema = Joi.object({
@@ -219,26 +262,31 @@ const locationPingSchema = Joi.object({
   lng: Joi.number().required().min(-180).max(180),
   accuracy: Joi.number().required().min(0),
   battery: Joi.number().required().min(0).max(100),
-  networkType: Joi.string().valid('wifi', 'cellular', 'none', 'unknown').required(),
-  alert: Joi.string().optional()
+  networkType: Joi.string()
+    .valid("wifi", "cellular", "none", "unknown")
+    .required(),
+  alert: Joi.string().optional(),
 });
 
 // PostgreSQL database connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  ssl:
+    process.env.NODE_ENV === "production"
+      ? { rejectUnauthorized: false }
+      : false,
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
 });
 
 // Test database connection
-pool.on('connect', () => {
-  logger.info('Connected to PostgreSQL database');
+pool.on("connect", () => {
+  logger.info("Connected to PostgreSQL database");
 });
 
-pool.on('error', (err) => {
-  logger.error('Unexpected error on idle client', err);
+pool.on("error", (err) => {
+  logger.error("Unexpected error on idle client", err);
   process.exit(-1);
 });
 
@@ -261,9 +309,13 @@ async function initializeDatabase() {
     `);
 
     // Add member_id column if not exists (migration)
-    await pool.query(`
+    await pool
+      .query(
+        `
       ALTER TABLE devices ADD COLUMN IF NOT EXISTS member_id TEXT
-    `).catch(() => {});
+    `,
+      )
+      .catch(() => {});
 
     // Create location_pings table
     await pool.query(`
@@ -275,10 +327,18 @@ async function initializeDatabase() {
         accuracy DECIMAL(10,2) NOT NULL CHECK (accuracy >= 0),
         battery INTEGER NOT NULL CHECK (battery >= 0 AND battery <= 100),
         network_type TEXT NOT NULL,
+        ip_address TEXT,
         alert TEXT,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    // Add ip_address column if missing (migration)
+    await pool
+      .query(
+        `ALTER TABLE location_pings ADD COLUMN IF NOT EXISTS ip_address TEXT`,
+      )
+      .catch(() => {});
 
     // Create reports table
     await pool.query(`
@@ -332,8 +392,19 @@ async function initializeDatabase() {
     `);
 
     // Make name and password_hash nullable (no longer required)
-    await pool.query(`ALTER TABLE members ALTER COLUMN name DROP NOT NULL`).catch(() => {});
-    await pool.query(`ALTER TABLE members ALTER COLUMN password_hash DROP NOT NULL`).catch(() => {});
+    await pool
+      .query(`ALTER TABLE members ALTER COLUMN name DROP NOT NULL`)
+      .catch(() => {});
+    await pool
+      .query(`ALTER TABLE members ALTER COLUMN password_hash DROP NOT NULL`)
+      .catch(() => {});
+
+    // Migration: drop UNIQUE on license_key to allow multiple devices per member
+    await pool
+      .query(
+        `ALTER TABLE devices DROP CONSTRAINT IF EXISTS devices_license_key_key`,
+      )
+      .catch(() => {});
 
     // Create password_reset_tokens table
     await pool.query(`
@@ -361,19 +432,25 @@ async function initializeDatabase() {
     `);
 
     // Insert default admin if not exists
-    const defaultPasswordHash = bcrypt.hashSync('admin123!@#', 12);
-    await pool.query(`
+    const defaultPasswordHash = bcrypt.hashSync("admin123!@#", 12);
+    await pool.query(
+      `
       INSERT INTO admins (username, password_hash, email)
       VALUES ($1, $2, $3)
       ON CONFLICT (username) DO UPDATE SET email = EXCLUDED.email
-    `, ['admin', defaultPasswordHash, 'info@ysecurity.app']);
+    `,
+      ["admin", defaultPasswordHash, "info@ysecurity.app"],
+    );
 
     // Create default admin member (VAT: 1301500118996) for testing
-    await pool.query(`
+    await pool.query(
+      `
       INSERT INTO members (member_id, email, payment_status, name)
       VALUES ($1, $2, 'completed', 'Ysecurity Admin')
       ON CONFLICT (member_id) DO NOTHING
-    `, ['YS-1301500118996', 'info@ysecurity.app']);
+    `,
+      ["YS-1301500118996", "info@ysecurity.app"],
+    );
 
     // Create device_photos table - stores captured photos per device
     await pool.query(`
@@ -400,14 +477,14 @@ async function initializeDatabase() {
     `);
 
     // Create device uploads directory
-    const uploadsDir = path.join(__dirname, 'uploads');
+    const uploadsDir = path.join(__dirname, "uploads");
     if (!fs.existsSync(uploadsDir)) {
       fs.mkdirSync(uploadsDir, { recursive: true });
     }
 
-    logger.info('Database tables initialized successfully');
+    logger.info("Database tables initialized successfully");
   } catch (error) {
-    logger.error('Error initializing database:', error);
+    logger.error("Error initializing database:", error);
     process.exit(1);
   }
 }
@@ -419,21 +496,21 @@ initializeDatabase();
 async function logDeviceActivity(deviceId, action, details = null) {
   try {
     await pool.query(
-      'INSERT INTO device_activity (device_id, action, details) VALUES ($1, $2, $3)',
-      [deviceId, action, details]
+      "INSERT INTO device_activity (device_id, action, details) VALUES ($1, $2, $3)",
+      [deviceId, action, details],
     );
   } catch (err) {
-    logger.error('Failed to log activity:', err);
+    logger.error("Failed to log activity:", err);
   }
 }
 
 // Helper: ensure device upload directory exists
 function ensureDeviceDir(deviceId) {
   // Sanitize deviceId for filesystem use
-  const safeId = deviceId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const deviceDir = path.join(__dirname, 'uploads', safeId);
-  const subDirs = ['pictures', 'location', 'network', 'activity'];
-  subDirs.forEach(sub => {
+  const safeId = deviceId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const deviceDir = path.join(__dirname, "uploads", safeId);
+  const subDirs = ["pictures", "location", "network", "activity"];
+  subDirs.forEach((sub) => {
     const dir = path.join(deviceDir, sub);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -444,73 +521,84 @@ function ensureDeviceDir(deviceId) {
 
 // Email transporter with environment variables (Microsoft 365 / GoDaddy)
 const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST || 'smtp.office365.com',
+  host: process.env.EMAIL_HOST || "smtp.office365.com",
   port: parseInt(process.env.EMAIL_PORT) || 587,
   secure: false,
   auth: {
     user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
+    pass: process.env.EMAIL_PASS,
   },
   tls: {
-    ciphers: 'SSLv3'
-  }
+    ciphers: "SSLv3",
+  },
 });
 
 // Socket.IO real-time features
-io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id);
+io.on("connection", (socket) => {
+  console.log("Client connected:", socket.id);
 
   // Admin authentication for socket
-  socket.on('authenticate', (token) => {
+  socket.on("authenticate", (token) => {
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       socket.user = decoded;
-      socket.join('admin'); // Join admin room
-      socket.emit('authenticated', { success: true });
+      socket.join("admin"); // Join admin room
+      socket.emit("authenticated", { success: true });
       console.log(`Admin ${decoded.username} authenticated via socket`);
     } catch (error) {
-      socket.emit('authenticated', { success: false, error: 'Invalid token' });
+      socket.emit("authenticated", { success: false, error: "Invalid token" });
     }
   });
 
   // Device authentication for socket (token-based)
-  socket.on('device-authenticate', (data) => {
+  socket.on("device-authenticate", (data) => {
     const { deviceId, deviceToken } = data;
     if (!deviceToken) {
-      socket.emit('device-authenticated', { success: false, error: 'Token required' });
+      socket.emit("device-authenticated", {
+        success: false,
+        error: "Token required",
+      });
       return;
     }
     try {
       const decoded = jwt.verify(deviceToken, process.env.JWT_SECRET);
       if (decoded.deviceId !== deviceId) {
-        socket.emit('device-authenticated', { success: false, error: 'Token mismatch' });
+        socket.emit("device-authenticated", {
+          success: false,
+          error: "Token mismatch",
+        });
         return;
       }
       socket.deviceId = deviceId;
       socket.memberId = decoded.memberId;
       socket.join(`device-${deviceId}`);
-      socket.emit('device-authenticated', { success: true });
+      socket.emit("device-authenticated", { success: true });
       console.log(`Device ${deviceId} authenticated via socket (verified)`);
     } catch (error) {
-      socket.emit('device-authenticated', { success: false, error: 'Invalid token' });
+      socket.emit("device-authenticated", {
+        success: false,
+        error: "Invalid token",
+      });
     }
   });
 
   // Admin requesting real-time location updates
-  socket.on('subscribe-locations', (deviceId) => {
-    if (!socket.user || socket.user.role !== 'admin') {
-      socket.emit('error', { message: 'Unauthorized' });
+  socket.on("subscribe-locations", (deviceId) => {
+    if (!socket.user || socket.user.role !== "admin") {
+      socket.emit("error", { message: "Unauthorized" });
       return;
     }
 
     socket.join(`locations-${deviceId}`);
-    console.log(`Admin ${socket.user.username} subscribed to device ${deviceId} locations`);
+    console.log(
+      `Admin ${socket.user.username} subscribed to device ${deviceId} locations`,
+    );
   });
 
   // Admin sending commands
-  socket.on('send-command', async (data) => {
-    if (!socket.user || socket.user.role !== 'admin') {
-      socket.emit('error', { message: 'Unauthorized' });
+  socket.on("send-command", async (data) => {
+    if (!socket.user || socket.user.role !== "admin") {
+      socket.emit("error", { message: "Unauthorized" });
       return;
     }
 
@@ -519,221 +607,339 @@ io.on('connection', (socket) => {
     try {
       // Save command to database
       const result = await pool.query(
-        'INSERT INTO commands (device_id, command, params) VALUES ($1, $2, $3) RETURNING id',
-        [deviceId, command, JSON.stringify(params || {})]
+        "INSERT INTO commands (device_id, command, params) VALUES ($1, $2, $3) RETURNING id",
+        [deviceId, command, JSON.stringify(params || {})],
       );
 
       // Send to device via socket
-      io.to(`device-${deviceId}`).emit('command', {
+      io.to(`device-${deviceId}`).emit("command", {
         id: result.rows[0].id,
         command,
         params: params || {},
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
       });
 
-      socket.emit('command-sent', { commandId: result.rows[0].id });
-      logger.info(`Command ${command} sent to device ${deviceId} by admin ${socket.user.username}`);
+      socket.emit("command-sent", { commandId: result.rows[0].id });
+      logger.info(
+        `Command ${command} sent to device ${deviceId} by admin ${socket.user.username}`,
+      );
     } catch (error) {
-      logger.error('Error sending command:', error);
-      socket.emit('command-error', { error: 'Failed to save command' });
+      logger.error("Error sending command:", error);
+      socket.emit("command-error", { error: "Failed to save command" });
     }
   });
 
-  socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
+  socket.on("disconnect", () => {
+    console.log("Client disconnected:", socket.id);
   });
 });
 
 // Function to broadcast location updates to subscribed admins
 const broadcastLocationUpdate = (deviceId, locationData) => {
-  io.to(`locations-${deviceId}`).emit('location-update', {
+  io.to(`locations-${deviceId}`).emit("location-update", {
     deviceId,
     ...locationData,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 };
 
 // DEV/TEST: Quick device registration without Member ID (REMOVE BEFORE LAUNCH)
-app.post('/api/dev/register-device', [
-  body('deviceId').isLength({ min: 5, max: 100 }).withMessage('Device ID required'),
-  body('model').isLength({ min: 1, max: 100 }).withMessage('Model is required'),
-  body('os').isLength({ min: 1, max: 100 }).withMessage('OS is required'),
-  handleValidationErrors
-], async (req, res) => {
-  const { deviceId, model, os } = req.body;
-  try {
-    // Use or create a test member
-    let testMember = await pool.query(
-      "SELECT member_id FROM members WHERE email = 'test@ysecurity.app' AND payment_status = 'completed'"
-    );
-    let memberId;
-    if (testMember.rows.length > 0) {
-      memberId = testMember.rows[0].member_id;
-    } else {
-      memberId = generateMemberId();
-      await pool.query(
-        "INSERT INTO members (member_id, email, payment_status) VALUES ($1, 'test@ysecurity.app', 'completed')",
-        [memberId]
+app.post(
+  "/api/dev/register-device",
+  [
+    body("deviceId")
+      .isLength({ min: 5, max: 100 })
+      .withMessage("Device ID required"),
+    body("model")
+      .isLength({ min: 1, max: 100 })
+      .withMessage("Model is required"),
+    body("os").isLength({ min: 1, max: 100 }).withMessage("OS is required"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { deviceId, model, os } = req.body;
+    try {
+      // Use or create a test member
+      let testMember = await pool.query(
+        "SELECT member_id FROM members WHERE email = 'test@ysecurity.app' AND payment_status = 'completed'",
       );
+      let memberId;
+      if (testMember.rows.length > 0) {
+        memberId = testMember.rows[0].member_id;
+      } else {
+        memberId = generateMemberId();
+        await pool.query(
+          "INSERT INTO members (member_id, email, payment_status) VALUES ($1, 'test@ysecurity.app', 'completed')",
+          [memberId],
+        );
+      }
+      // Delete any existing device for this test member so we can re-register
+      await pool.query("DELETE FROM devices WHERE member_id = $1", [memberId]);
+      await pool.query(
+        "INSERT INTO devices (id, model, os, member_id, license_key, status) VALUES ($1, $2, $3, $4, $5, $6)",
+        [deviceId, model, os, memberId, memberId, "active"],
+      );
+      // Generate a device token for secure Socket.IO auth
+      const deviceToken = jwt.sign(
+        { deviceId, memberId },
+        process.env.JWT_SECRET,
+        { expiresIn: "365d" },
+      );
+
+      logger.info(
+        `[DEV] Test device registered: ${deviceId} with member ${memberId}`,
+      );
+      res.json({ success: true, deviceId, memberId, deviceToken });
+    } catch (error) {
+      logger.error("[DEV] Test register error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to register test device" });
     }
-    // Delete any existing device for this test member so we can re-register
-    await pool.query('DELETE FROM devices WHERE member_id = $1', [memberId]);
-    await pool.query(
-      'INSERT INTO devices (id, model, os, member_id, license_key, status) VALUES ($1, $2, $3, $4, $5, $6)',
-      [deviceId, model, os, memberId, memberId, 'active']
-    );
-    // Generate a device token for secure Socket.IO auth
-    const deviceToken = jwt.sign({ deviceId, memberId }, process.env.JWT_SECRET, { expiresIn: '365d' });
+  },
+);
 
-    logger.info(`[DEV] Test device registered: ${deviceId} with member ${memberId}`);
-    res.json({ success: true, deviceId, memberId, deviceToken });
-  } catch (error) {
-    logger.error('[DEV] Test register error:', error);
-    res.status(500).json({ success: false, error: 'Failed to register test device' });
-  }
-});
+app.post(
+  "/api/devices/register",
+  [
+    body("deviceId")
+      .isLength({ min: 10, max: 100 })
+      .withMessage("Device ID must be 10-100 characters"),
+    body("model")
+      .isLength({ min: 1, max: 100 })
+      .withMessage("Model is required"),
+    body("os").isLength({ min: 1, max: 100 }).withMessage("OS is required"),
+    body("memberId")
+      .matches(/^YS-\d+$/)
+      .withMessage("Valid Member ID required (format: YS-XXXXX...)"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { deviceId, model, os, memberId } = req.body;
 
-app.post('/api/devices/register', [
-  body('deviceId').isLength({ min: 10, max: 100 }).withMessage('Device ID must be 10-100 characters'),
-  body('model').isLength({ min: 1, max: 100 }).withMessage('Model is required'),
-  body('os').isLength({ min: 1, max: 100 }).withMessage('OS is required'),
-  body('memberId').matches(/^YS-\d{6,15}$/).withMessage('Valid Member ID required (format: YS-XXXXXX)'),
-  handleValidationErrors
-], async (req, res) => {
-  const { deviceId, model, os, memberId } = req.body;
+    try {
+      // Verify member exists and payment is completed
+      const member = await pool.query(
+        "SELECT id, member_id, payment_status FROM members WHERE member_id = $1",
+        [memberId],
+      );
+      if (member.rows.length === 0) {
+        return res
+          .status(401)
+          .json({ success: false, error: "Invalid Member ID" });
+      }
+      if (member.rows[0].payment_status !== "completed") {
+        return res
+          .status(403)
+          .json({ success: false, error: "Membership payment not completed" });
+      }
 
-  try {
-    // Verify member exists and payment is completed
-    const member = await pool.query(
-      'SELECT id, member_id, payment_status FROM members WHERE member_id = $1',
-      [memberId]
-    );
-    if (member.rows.length === 0) {
-      return res.status(401).json({ success: false, error: 'Invalid Member ID' });
+      // Check if this device is already registered
+      const existingDevice = await pool.query(
+        "SELECT id FROM devices WHERE id = $1",
+        [deviceId],
+      );
+      if (existingDevice.rows.length > 0) {
+        // Device already registered, return existing info
+        const deviceToken = jwt.sign(
+          { deviceId, memberId },
+          process.env.JWT_SECRET,
+          { expiresIn: "365d" },
+        );
+        return res.json({ success: true, deviceId, memberId, deviceToken });
+      }
+
+      await pool.query(
+        "INSERT INTO devices (id, model, os, member_id, license_key, status) VALUES ($1, $2, $3, $4, $5, $6)",
+        [deviceId, model, os, memberId, deviceId, "installed"],
+      );
+
+      // Create device directory structure
+      ensureDeviceDir(deviceId);
+
+      // Log activity: device installed
+      await logDeviceActivity(
+        deviceId,
+        "installed",
+        JSON.stringify({ model, os, memberId }),
+      );
+
+      // Generate a device token for secure Socket.IO auth
+      const deviceToken = jwt.sign(
+        { deviceId, memberId },
+        process.env.JWT_SECRET,
+        { expiresIn: "365d" },
+      );
+
+      logger.info(`Device ${deviceId} registered with member ${memberId}`);
+      res.json({ success: true, deviceId, memberId, deviceToken });
+    } catch (error) {
+      logger.error("Database error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to register device" });
     }
-    if (member.rows[0].payment_status !== 'completed') {
-      return res.status(403).json({ success: false, error: 'Membership payment not completed' });
-    }
-
-    // Check if this device is already registered
-    const existingDevice = await pool.query('SELECT id FROM devices WHERE id = $1', [deviceId]);
-    if (existingDevice.rows.length > 0) {
-      // Device already registered, return existing info
-      const deviceToken = jwt.sign({ deviceId, memberId }, process.env.JWT_SECRET, { expiresIn: '365d' });
-      return res.json({ success: true, deviceId, memberId, deviceToken });
-    }
-
-    await pool.query(
-      'INSERT INTO devices (id, model, os, member_id, license_key) VALUES ($1, $2, $3, $4, $5)',
-      [deviceId, model, os, memberId, memberId]
-    );
-
-    // Create device directory structure
-    ensureDeviceDir(deviceId);
-
-    // Log activity: device installed
-    await logDeviceActivity(deviceId, 'installed', JSON.stringify({ model, os, memberId }));
-
-    // Generate a device token for secure Socket.IO auth
-    const deviceToken = jwt.sign({ deviceId, memberId }, process.env.JWT_SECRET, { expiresIn: '365d' });
-
-    logger.info(`Device ${deviceId} registered with member ${memberId}`);
-    res.json({ success: true, deviceId, memberId, deviceToken });
-  } catch (error) {
-    logger.error('Database error:', error);
-    res.status(500).json({ success: false, error: 'Failed to register device' });
-  }
-});
+  },
+);
 
 // Location ping with validation and authentication
-app.post('/api/devices/:deviceId/ping', [
-  param('deviceId').isLength({ min: 10, max: 100 }).withMessage('Invalid device ID'),
-  body('lat').isFloat({ min: -90, max: 90 }).withMessage('Invalid latitude'),
-  body('lng').isFloat({ min: -180, max: 180 }).withMessage('Invalid longitude'),
-  body('accuracy').isFloat({ min: 0 }).withMessage('Invalid accuracy'),
-  body('battery').isInt({ min: 0, max: 100 }).withMessage('Invalid battery level'),
-  body('networkType').isIn(['wifi', 'cellular', 'none', 'unknown', '4g', '3g', '2g', 'slow-2g', 'ethernet']).withMessage('Invalid network type'),
-  // Normalize networkType after validation
+app.post(
+  "/api/devices/:deviceId/ping",
+  [
+    param("deviceId")
+      .isLength({ min: 10, max: 100 })
+      .withMessage("Invalid device ID"),
+    body("lat").isFloat({ min: -90, max: 90 }).withMessage("Invalid latitude"),
+    body("lng")
+      .isFloat({ min: -180, max: 180 })
+      .withMessage("Invalid longitude"),
+    body("accuracy").isFloat({ min: 0 }).withMessage("Invalid accuracy"),
+    body("battery")
+      .isInt({ min: -1, max: 100 })
+      .withMessage("Invalid battery level"),
+    body("networkType")
+      .isIn([
+        "wifi",
+        "cellular",
+        "none",
+        "unknown",
+        "4g",
+        "3g",
+        "2g",
+        "slow-2g",
+        "ethernet",
+      ])
+      .withMessage("Invalid network type"),
+    // Normalize networkType after validation
 
-  handleValidationErrors
-], async (req, res) => {
-  const { deviceId } = req.params;
-  const { lat, lng, accuracy, battery, alert } = req.body;
-  // Normalize networkType: map browser values to canonical
-  const rawNetworkType = req.body.networkType;
-  const networkType = ['4g', '3g', '2g', 'slow-2g'].includes(rawNetworkType) ? 'cellular'
-    : rawNetworkType === 'ethernet' ? 'wifi'
-    : rawNetworkType;
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { deviceId } = req.params;
+    const { lat, lng, accuracy, battery, alert } = req.body;
+    // Normalize networkType: map browser values to canonical
+    const rawNetworkType = req.body.networkType;
+    const networkType = ["4g", "3g", "2g", "slow-2g"].includes(rawNetworkType)
+      ? "cellular"
+      : rawNetworkType === "ethernet"
+        ? "wifi"
+        : rawNetworkType;
 
-  try {
-    // Verify device exists
-    const device = await pool.query('SELECT status FROM devices WHERE id = $1', [deviceId]);
-    if (device.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Device not found' });
+    try {
+      // Verify device exists
+      const device = await pool.query(
+        "SELECT status FROM devices WHERE id = $1",
+        [deviceId],
+      );
+      if (device.rows.length === 0) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Device not found" });
+      }
+
+      // Capture IP from request
+      const ipAddress = (req.headers["x-forwarded-for"] || req.ip || "")
+        .split(",")[0]
+        .trim();
+
+      const query = alert
+        ? "INSERT INTO location_pings (device_id, latitude, longitude, accuracy, battery, network_type, ip_address, alert) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+        : "INSERT INTO location_pings (device_id, latitude, longitude, accuracy, battery, network_type, ip_address) VALUES ($1, $2, $3, $4, $5, $6, $7)";
+
+      const values = alert
+        ? [deviceId, lat, lng, accuracy, battery, networkType, ipAddress, alert]
+        : [deviceId, lat, lng, accuracy, battery, networkType, ipAddress];
+
+      await pool.query(query, values);
+
+      // Log first ping as activity (install location + network + IP)
+      const pingCount = await pool.query(
+        "SELECT COUNT(*)::int as count FROM location_pings WHERE device_id = $1",
+        [deviceId],
+      );
+      if (pingCount.rows[0].count === 1) {
+        await logDeviceActivity(
+          deviceId,
+          "first_location",
+          JSON.stringify({
+            lat,
+            lng,
+            accuracy,
+            battery,
+            networkType,
+            ipAddress,
+          }),
+        );
+        await logDeviceActivity(
+          deviceId,
+          "network_detected",
+          `Network: ${networkType}, IP: ${ipAddress}, Battery: ${battery}%`,
+        );
+      }
+
+      // Log geofence breach as activity
+      if (alert === "geofence_breach") {
+        await logDeviceActivity(
+          deviceId,
+          "geofence_breach",
+          JSON.stringify({ lat, lng }),
+        );
+      }
+
+      logger.info(`Location ping saved for device ${deviceId}`);
+      res.json({ success: true });
+
+      // Broadcast real-time update to subscribed admins
+      broadcastLocationUpdate(deviceId, {
+        lat,
+        lng,
+        accuracy,
+        battery,
+        networkType,
+        alert,
+      });
+    } catch (error) {
+      logger.error("Database error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to save location ping" });
     }
-
-    const query = alert
-      ? 'INSERT INTO location_pings (device_id, latitude, longitude, accuracy, battery, network_type, alert) VALUES ($1, $2, $3, $4, $5, $6, $7)'
-      : 'INSERT INTO location_pings (device_id, latitude, longitude, accuracy, battery, network_type) VALUES ($1, $2, $3, $4, $5, $6)';
-
-    const values = alert
-      ? [deviceId, lat, lng, accuracy, battery, networkType, alert]
-      : [deviceId, lat, lng, accuracy, battery, networkType];
-
-    await pool.query(query, values);
-
-    // Log first ping as activity (install location + network)
-    const pingCount = await pool.query('SELECT COUNT(*)::int as count FROM location_pings WHERE device_id = $1', [deviceId]);
-    if (pingCount.rows[0].count === 1) {
-      await logDeviceActivity(deviceId, 'first_location', JSON.stringify({ lat, lng, accuracy, battery, networkType }));
-      await logDeviceActivity(deviceId, 'network_detected', `Network: ${networkType}, Battery: ${battery}%`);
-    }
-
-    // Log geofence breach as activity
-    if (alert === 'geofence_breach') {
-      await logDeviceActivity(deviceId, 'geofence_breach', JSON.stringify({ lat, lng }));
-    }
-
-    logger.info(`Location ping saved for device ${deviceId}`);
-    res.json({ success: true });
-
-    // Broadcast real-time update to subscribed admins
-    broadcastLocationUpdate(deviceId, { lat, lng, accuracy, battery, networkType, alert });
-  } catch (error) {
-    logger.error('Database error:', error);
-    res.status(500).json({ success: false, error: 'Failed to save location ping' });
-  }
-});
+  },
+);
 
 // Report device lost
-app.post('/api/reports', async (req, res) => {
+app.post("/api/reports", async (req, res) => {
   const { deviceId, userInfo } = req.body; // userInfo is JSON with verification details
 
   try {
     const result = await pool.query(
-      'INSERT INTO reports (device_id, user_info) VALUES ($1, $2) RETURNING id',
-      [deviceId, JSON.stringify(userInfo)]
+      "INSERT INTO reports (device_id, user_info) VALUES ($1, $2) RETURNING id",
+      [deviceId, JSON.stringify(userInfo)],
     );
 
     res.json({ success: true, reportId: result.rows[0].id });
   } catch (error) {
-    logger.error('Database error:', error);
-    res.status(500).json({ error: 'Failed to create report' });
+    logger.error("Database error:", error);
+    res.status(500).json({ error: "Failed to create report" });
   }
 });
 
 // JWT Authentication middleware
 const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
 
   if (!token) {
-    return res.status(401).json({ success: false, error: 'Access token required' });
+    return res
+      .status(401)
+      .json({ success: false, error: "Access token required" });
   }
 
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
     if (err) {
-      return res.status(403).json({ success: false, error: 'Invalid or expired token' });
+      return res
+        .status(403)
+        .json({ success: false, error: "Invalid or expired token" });
     }
     req.user = user;
     next();
@@ -741,67 +947,91 @@ const authenticateToken = (req, res, next) => {
 };
 
 // Admin login with validation
-app.post('/api/admin/login', [
-  body('username').isLength({ min: 3, max: 50 }).withMessage('Username must be 3-50 characters'),
-  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  handleValidationErrors
-], async (req, res) => {
-  const { username, password } = req.body;
+app.post(
+  "/api/admin/login",
+  [
+    body("username")
+      .isLength({ min: 3, max: 50 })
+      .withMessage("Username must be 3-50 characters"),
+    body("password")
+      .isLength({ min: 6 })
+      .withMessage("Password must be at least 6 characters"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { username, password } = req.body;
 
-  try {
-    const result = await pool.query('SELECT * FROM admins WHERE username = $1', [username]);
-    const admin = result.rows[0];
+    try {
+      const result = await pool.query(
+        "SELECT * FROM admins WHERE username = $1",
+        [username],
+      );
+      const admin = result.rows[0];
 
-    if (!admin || !bcrypt.compareSync(password, admin.password_hash)) {
-      return res.status(401).json({ success: false, error: 'Invalid credentials' });
+      if (!admin || !bcrypt.compareSync(password, admin.password_hash)) {
+        return res
+          .status(401)
+          .json({ success: false, error: "Invalid credentials" });
+      }
+
+      const token = jwt.sign(
+        { id: admin.id, username: admin.username, role: admin.role },
+        process.env.JWT_SECRET,
+        { expiresIn: "24h" },
+      );
+
+      // Update last login
+      await pool.query(
+        "UPDATE admins SET last_login = CURRENT_TIMESTAMP WHERE id = $1",
+        [admin.id],
+      );
+
+      logger.info(`Admin ${username} logged in`);
+      res.json({
+        success: true,
+        token,
+        user: { username: admin.username, role: admin.role },
+      });
+    } catch (error) {
+      logger.error("Database error:", error);
+      res.status(500).json({ success: false, error: "Database error" });
     }
-
-    const token = jwt.sign(
-      { id: admin.id, username: admin.username, role: admin.role },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
-    // Update last login
-    await pool.query('UPDATE admins SET last_login = CURRENT_TIMESTAMP WHERE id = $1', [admin.id]);
-
-    logger.info(`Admin ${username} logged in`);
-    res.json({ success: true, token, user: { username: admin.username, role: admin.role } });
-  } catch (error) {
-    logger.error('Database error:', error);
-    res.status(500).json({ success: false, error: 'Database error' });
-  }
-});
+  },
+);
 
 // Get all devices for admin (protected)
-app.get('/api/admin/devices', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
+app.get("/api/admin/devices", authenticateToken, async (req, res) => {
+  if (req.user.role !== "admin") {
+    return res
+      .status(403)
+      .json({ success: false, error: "Admin access required" });
   }
 
   try {
     const result = await pool.query(
-      'SELECT id, model, os, owner, member_id, status, created_at FROM devices ORDER BY created_at DESC'
+      "SELECT id, model, os, owner, member_id, status, created_at FROM devices ORDER BY created_at DESC",
     );
     res.json({ success: true, devices: result.rows });
   } catch (error) {
-    logger.error('Database error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch devices' });
+    logger.error("Database error:", error);
+    res.status(500).json({ success: false, error: "Failed to fetch devices" });
   }
 });
 
 // Get all devices latest locations for tracking dashboard
-app.get('/api/admin/devices/all-locations', [
-  authenticateToken,
-  handleValidationErrors
-], async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
+app.get(
+  "/api/admin/devices/all-locations",
+  [authenticateToken, handleValidationErrors],
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
+    }
 
-  try {
-    // Get latest ping for each device using DISTINCT ON
-    const result = await pool.query(`
+    try {
+      // Get latest ping for each device using DISTINCT ON
+      const result = await pool.query(`
       SELECT DISTINCT ON (lp.device_id)
         lp.device_id, lp.latitude, lp.longitude, lp.battery, lp.network_type, lp.accuracy, lp.timestamp, lp.alert,
         d.model, d.os, d.status, d.member_id
@@ -809,303 +1039,435 @@ app.get('/api/admin/devices/all-locations', [
       JOIN devices d ON d.id = lp.device_id
       ORDER BY lp.device_id, lp.timestamp DESC
     `);
-    res.json({ success: true, locations: result.rows });
-  } catch (error) {
-    logger.error('All locations error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch locations' });
-  }
-});
+      res.json({ success: true, locations: result.rows });
+    } catch (error) {
+      logger.error("All locations error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch locations" });
+    }
+  },
+);
 
 // Get location history (protected)
-app.get('/api/admin/devices/:deviceId/locations', [
-  authenticateToken,
-  param('deviceId').isLength({ min: 10, max: 100 }).withMessage('Invalid device ID'),
-  handleValidationErrors
-], async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
+app.get(
+  "/api/admin/devices/:deviceId/locations",
+  [
+    authenticateToken,
+    param("deviceId")
+      .isLength({ min: 10, max: 100 })
+      .withMessage("Invalid device ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
+    }
 
-  const { deviceId } = req.params;
-  const limit = parseInt(req.query.limit) || 100;
+    const { deviceId } = req.params;
+    const limit = parseInt(req.query.limit) || 100;
 
-  try {
-    const result = await pool.query(
-      'SELECT * FROM location_pings WHERE device_id = $1 ORDER BY timestamp DESC LIMIT $2',
-      [deviceId, limit]
-    );
-    res.json({ success: true, locations: result.rows });
-  } catch (error) {
-    logger.error('Database error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch locations' });
-  }
-});
+    try {
+      const result = await pool.query(
+        "SELECT * FROM location_pings WHERE device_id = $1 ORDER BY timestamp DESC LIMIT $2",
+        [deviceId, limit],
+      );
+      res.json({ success: true, locations: result.rows });
+    } catch (error) {
+      logger.error("Database error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch locations" });
+    }
+  },
+);
 
 // Mark device as lost (protected)
-app.post('/api/admin/devices/:deviceId/mark-lost', [
-  authenticateToken,
-  param('deviceId').isLength({ min: 10, max: 100 }).withMessage('Invalid device ID'),
-  handleValidationErrors
-], async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
-
-  const { deviceId } = req.params;
-
-  try {
-    const result = await pool.query(
-      'UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
-      ['reported', deviceId]
-    );
-
-    if (result.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Device not found' });
+app.post(
+  "/api/admin/devices/:deviceId/mark-lost",
+  [
+    authenticateToken,
+    param("deviceId")
+      .isLength({ min: 10, max: 100 })
+      .withMessage("Invalid device ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
     }
 
-    await logDeviceActivity(deviceId, 'marked_lost', `Marked as lost by admin ${req.user.username}`);
-    logger.info(`Device ${deviceId} marked as lost by admin ${req.user.username}`);
-    res.json({ success: true, message: 'Device marked as lost' });
-  } catch (error) {
-    logger.error('Database error:', error);
-    res.status(500).json({ success: false, error: 'Failed to update device status' });
-  }
-});
-// Send command to device (protected)
-app.post('/api/admin/devices/:deviceId/command', [
-  authenticateToken,
-  param('deviceId').isLength({ min: 10, max: 100 }).withMessage('Invalid device ID'),
-  body('command').isIn(['alarm', 'camera', 'geofence']).withMessage('Invalid command'),
-  handleValidationErrors
-], async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
+    const { deviceId } = req.params;
 
-  const { deviceId } = req.params;
-  const { command, params } = req.body;
+    try {
+      const result = await pool.query(
+        "UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+        ["reported", deviceId],
+      );
 
-  // Validate geofence params
-  if (command === 'geofence') {
-    const { lat, lng, radius } = params || {};
-    if (!lat || !lng || !radius || lat < -90 || lat > 90 || lng < -180 || lng > 180 || radius <= 0) {
-      return res.status(400).json({ success: false, error: 'Invalid geofence parameters' });
-    }
-  }
-
-  try {
-    const result = await pool.query(
-      'INSERT INTO commands (device_id, command, params) VALUES ($1, $2, $3) RETURNING id',
-      [deviceId, command, JSON.stringify(params || {})]
-    );
-
-    logger.info(`Command ${command} sent to device ${deviceId} by admin ${req.user.username}`);
-    res.json({ success: true, commandId: result.rows[0].id });
-  } catch (error) {
-    logger.error('Database error:', error);
-    res.status(500).json({ success: false, error: 'Failed to send command' });
-  }
-});
-// Payment to reveal location
-app.post('/api/payments/create-session', [
-  authenticateToken,
-  body('deviceId').isLength({ min: 10, max: 100 }).withMessage('Invalid device ID'),
-  handleValidationErrors
-], async (req, res) => {
-  const { deviceId } = req.body;
-
-  try {
-    // Verify device exists
-    const device = await pool.query('SELECT id FROM devices WHERE id = $1', [deviceId]);
-    if (device.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Device not found' });
-    }
-
-    // Create Stripe session
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: [{
-        price_data: {
-          currency: 'usd',
-          product_data: { name: 'Location Reveal - Device Tracking' },
-          unit_amount: 1000, // $10.00
-        },
-        quantity: 1,
-      }],
-      mode: 'payment',
-      success_url: `${process.env.API_BASE_URL}/payment-success?device=${deviceId}&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.API_BASE_URL}/payment-cancel`,
-      metadata: {
-        deviceId: deviceId,
-        userId: req.user.id
+      if (result.rowCount === 0) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Device not found" });
       }
-    });
 
-    res.json({ success: true, sessionId: session.id, url: session.url });
-  } catch (error) {
-    logger.error('Payment error:', error);
-    res.status(500).json({ success: false, error: 'Payment processing failed' });
-  }
-});
+      await logDeviceActivity(
+        deviceId,
+        "marked_lost",
+        `Marked as lost by admin ${req.user.username}`,
+      );
+      logger.info(
+        `Device ${deviceId} marked as lost by admin ${req.user.username}`,
+      );
+      res.json({ success: true, message: "Device marked as lost" });
+    } catch (error) {
+      logger.error("Database error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to update device status" });
+    }
+  },
+);
+// Send command to device (protected)
+app.post(
+  "/api/admin/devices/:deviceId/command",
+  [
+    authenticateToken,
+    param("deviceId")
+      .isLength({ min: 10, max: 100 })
+      .withMessage("Invalid device ID"),
+    body("command")
+      .isIn(["alarm", "camera", "geofence"])
+      .withMessage("Invalid command"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
+    }
+
+    const { deviceId } = req.params;
+    const { command, params } = req.body;
+
+    // Validate geofence params
+    if (command === "geofence") {
+      const { lat, lng, radius } = params || {};
+      if (
+        !lat ||
+        !lng ||
+        !radius ||
+        lat < -90 ||
+        lat > 90 ||
+        lng < -180 ||
+        lng > 180 ||
+        radius <= 0
+      ) {
+        return res
+          .status(400)
+          .json({ success: false, error: "Invalid geofence parameters" });
+      }
+    }
+
+    try {
+      const result = await pool.query(
+        "INSERT INTO commands (device_id, command, params) VALUES ($1, $2, $3) RETURNING id",
+        [deviceId, command, JSON.stringify(params || {})],
+      );
+
+      logger.info(
+        `Command ${command} sent to device ${deviceId} by admin ${req.user.username}`,
+      );
+      res.json({ success: true, commandId: result.rows[0].id });
+    } catch (error) {
+      logger.error("Database error:", error);
+      res.status(500).json({ success: false, error: "Failed to send command" });
+    }
+  },
+);
+// Payment to reveal location
+app.post(
+  "/api/payments/create-session",
+  [
+    authenticateToken,
+    body("deviceId")
+      .isLength({ min: 10, max: 100 })
+      .withMessage("Invalid device ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { deviceId } = req.body;
+
+    try {
+      // Verify device exists
+      const device = await pool.query("SELECT id FROM devices WHERE id = $1", [
+        deviceId,
+      ]);
+      if (device.rows.length === 0) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Device not found" });
+      }
+
+      // Create Stripe session
+      const session = await stripe.checkout.sessions.create({
+        payment_method_types: ["card"],
+        line_items: [
+          {
+            price_data: {
+              currency: "usd",
+              product_data: { name: "Location Reveal - Device Tracking" },
+              unit_amount: 1000, // $10.00
+            },
+            quantity: 1,
+          },
+        ],
+        mode: "payment",
+        success_url: `${process.env.API_BASE_URL}/payment-success?device=${deviceId}&session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.API_BASE_URL}/payment-cancel`,
+        metadata: {
+          deviceId: deviceId,
+          userId: req.user.id,
+        },
+      });
+
+      res.json({ success: true, sessionId: session.id, url: session.url });
+    } catch (error) {
+      logger.error("Payment error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Payment processing failed" });
+    }
+  },
+);
 
 // Get latest location after payment (protected)
-app.get('/api/devices/:deviceId/location', [
-  authenticateToken,
-  param('deviceId').isLength({ min: 10, max: 100 }).withMessage('Invalid device ID'),
-  handleValidationErrors
-], async (req, res) => {
-  const { deviceId } = req.params;
+app.get(
+  "/api/devices/:deviceId/location",
+  [
+    authenticateToken,
+    param("deviceId")
+      .isLength({ min: 10, max: 100 })
+      .withMessage("Invalid device ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { deviceId } = req.params;
 
-  try {
-    // In production, verify payment status here
-    const result = await pool.query(
-      'SELECT latitude, longitude, accuracy, battery, timestamp FROM location_pings WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 1',
-      [deviceId]
-    );
+    try {
+      // In production, verify payment status here
+      const result = await pool.query(
+        "SELECT latitude, longitude, accuracy, battery, timestamp FROM location_pings WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 1",
+        [deviceId],
+      );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'No location data found' });
+      if (result.rows.length === 0) {
+        return res
+          .status(404)
+          .json({ success: false, error: "No location data found" });
+      }
+
+      res.json({ success: true, location: result.rows[0] });
+    } catch (error) {
+      logger.error("Database error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch location" });
     }
-
-    res.json({ success: true, location: result.rows[0] });
-  } catch (error) {
-    logger.error('Database error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch location' });
-  }
-});
+  },
+);
 
 // Get device status
-app.get('/api/devices/:deviceId/status', [
-  param('deviceId').isLength({ min: 10, max: 100 }).withMessage('Invalid device ID'),
-  handleValidationErrors
-], async (req, res) => {
-  const { deviceId } = req.params;
+app.get(
+  "/api/devices/:deviceId/status",
+  [
+    param("deviceId")
+      .isLength({ min: 10, max: 100 })
+      .withMessage("Invalid device ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { deviceId } = req.params;
 
-  try {
-    const result = await pool.query('SELECT status FROM devices WHERE id = $1', [deviceId]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Device not found' });
+    try {
+      const result = await pool.query(
+        "SELECT status FROM devices WHERE id = $1",
+        [deviceId],
+      );
+      if (result.rows.length === 0) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Device not found" });
+      }
+      res.json({ success: true, status: result.rows[0].status });
+    } catch (error) {
+      logger.error("Database error:", error);
+      res.status(500).json({ success: false, error: "Database error" });
     }
-    res.json({ success: true, status: result.rows[0].status });
-  } catch (error) {
-    logger.error('Database error:', error);
-    res.status(500).json({ success: false, error: 'Database error' });
-  }
-});
+  },
+);
 
 // Get pending commands for device
-app.get('/api/devices/:deviceId/commands', [
-  param('deviceId').isLength({ min: 10, max: 100 }).withMessage('Invalid device ID'),
-  handleValidationErrors
-], async (req, res) => {
-  const { deviceId } = req.params;
+app.get(
+  "/api/devices/:deviceId/commands",
+  [
+    param("deviceId")
+      .isLength({ min: 10, max: 100 })
+      .withMessage("Invalid device ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { deviceId } = req.params;
 
-  try {
-    const result = await pool.query(
-      'SELECT id, command, params, created_at FROM commands WHERE device_id = $1 AND executed = FALSE ORDER BY created_at DESC',
-      [deviceId]
-    );
-    res.json({ success: true, commands: result.rows });
-  } catch (error) {
-    logger.error('Database error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch commands' });
-  }
-});
+    try {
+      const result = await pool.query(
+        "SELECT id, command, params, created_at FROM commands WHERE device_id = $1 AND executed = FALSE ORDER BY created_at DESC",
+        [deviceId],
+      );
+      res.json({ success: true, commands: result.rows });
+    } catch (error) {
+      logger.error("Database error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to fetch commands" });
+    }
+  },
+);
 
 // Mark command as executed
-app.post('/api/commands/:commandId/executed', [
-  param('commandId').isInt({ min: 1 }).withMessage('Invalid command ID'),
-  handleValidationErrors
-], async (req, res) => {
-  const { commandId } = req.params;
+app.post(
+  "/api/commands/:commandId/executed",
+  [
+    param("commandId").isInt({ min: 1 }).withMessage("Invalid command ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { commandId } = req.params;
 
-  try {
-    const result = await pool.query('UPDATE commands SET executed = TRUE WHERE id = $1', [commandId]);
+    try {
+      const result = await pool.query(
+        "UPDATE commands SET executed = TRUE WHERE id = $1",
+        [commandId],
+      );
 
-    if (result.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Command not found' });
+      if (result.rowCount === 0) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Command not found" });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      logger.error("Database error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to update command" });
     }
-
-    res.json({ success: true });
-  } catch (error) {
-    logger.error('Database error:', error);
-    res.status(500).json({ success: false, error: 'Failed to update command' });
-  }
-});
+  },
+);
 
 // Receive photo from device
-app.post('/api/devices/:deviceId/photo', [
-  param('deviceId').isLength({ min: 10, max: 100 }).withMessage('Invalid device ID'),
-  body('photo').isLength({ min: 1 }).withMessage('Photo data required'),
-  handleValidationErrors
-], async (req, res) => {
-  const { deviceId } = req.params;
-  const { photo } = req.body;
+app.post(
+  "/api/devices/:deviceId/photo",
+  [
+    param("deviceId")
+      .isLength({ min: 10, max: 100 })
+      .withMessage("Invalid device ID"),
+    body("photo").isLength({ min: 1 }).withMessage("Photo data required"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { deviceId } = req.params;
+    const { photo } = req.body;
 
-  try {
-    // Save photo to device's pictures folder
-    const deviceDir = ensureDeviceDir(deviceId);
-    const timestamp = Date.now();
-    const filename = `photo_${timestamp}.jpg`;
-    const filePath = path.join(deviceDir, 'pictures', filename);
-    const photoBuffer = Buffer.from(photo, 'base64');
-    fs.writeFileSync(filePath, photoBuffer);
+    try {
+      // Save photo to device's pictures folder
+      const deviceDir = ensureDeviceDir(deviceId);
+      const timestamp = Date.now();
+      const filename = `photo_${timestamp}.jpg`;
+      const filePath = path.join(deviceDir, "pictures", filename);
+      const photoBuffer = Buffer.from(photo, "base64");
+      fs.writeFileSync(filePath, photoBuffer);
 
-    // Save to database
-    const safeId = deviceId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const relativePath = `uploads/${safeId}/pictures/${filename}`;
-    await pool.query(
-      'INSERT INTO device_photos (device_id, filename, file_path, file_size, source) VALUES ($1, $2, $3, $4, $5)',
-      [deviceId, filename, relativePath, photoBuffer.length, 'camera']
-    );
+      // Save to database
+      const safeId = deviceId.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const relativePath = `uploads/${safeId}/pictures/${filename}`;
+      await pool.query(
+        "INSERT INTO device_photos (device_id, filename, file_path, file_size, source) VALUES ($1, $2, $3, $4, $5)",
+        [deviceId, filename, relativePath, photoBuffer.length, "camera"],
+      );
 
-    // Log activity
-    await logDeviceActivity(deviceId, 'photo_captured', JSON.stringify({ filename, size: photoBuffer.length }));
+      // Log activity
+      await logDeviceActivity(
+        deviceId,
+        "photo_captured",
+        JSON.stringify({ filename, size: photoBuffer.length }),
+      );
 
-    logger.info(`Photo saved for device ${deviceId}: ${filename} (${photoBuffer.length} bytes)`);
+      logger.info(
+        `Photo saved for device ${deviceId}: ${filename} (${photoBuffer.length} bytes)`,
+      );
 
-    // Send email notification to admin
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
-      to: 'info@ysecurity.app',
-      subject: `Camera capture from device ${deviceId}`,
-      text: `A photo has been captured from device ${deviceId}. Check the admin dashboard for details.`,
-      attachments: [{
-        filename: `device-${deviceId}-photo.jpg`,
-        content: photoBuffer,
-      }]
-    };
+      // Send email notification to admin
+      const mailOptions = {
+        from: process.env.EMAIL_USER,
+        to: "info@ysecurity.app",
+        subject: `Camera capture from device ${deviceId}`,
+        text: `A photo has been captured from device ${deviceId}. Check the admin dashboard for details.`,
+        attachments: [
+          {
+            filename: `device-${deviceId}-photo.jpg`,
+            content: photoBuffer,
+          },
+        ],
+      };
 
-    transporter.sendMail(mailOptions).catch(err => logger.error('Email error:', err));
+      transporter
+        .sendMail(mailOptions)
+        .catch((err) => logger.error("Email error:", err));
 
-    res.json({ success: true, filename });
-  } catch (error) {
-    logger.error('Photo save error:', error);
-    res.status(500).json({ success: false, error: 'Failed to save photo' });
-  }
-});
+      res.json({ success: true, filename });
+    } catch (error) {
+      logger.error("Photo save error:", error);
+      res.status(500).json({ success: false, error: "Failed to save photo" });
+    }
+  },
+);
 
 // Report device lost with validation
-app.post('/api/reports', [
-  body('deviceId').isLength({ min: 10, max: 100 }).withMessage('Invalid device ID'),
-  body('userInfo').isObject().withMessage('User info must be an object'),
-  handleValidationErrors
-], async (req, res) => {
-  const { deviceId, userInfo } = req.body;
+app.post(
+  "/api/reports",
+  [
+    body("deviceId")
+      .isLength({ min: 10, max: 100 })
+      .withMessage("Invalid device ID"),
+    body("userInfo").isObject().withMessage("User info must be an object"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { deviceId, userInfo } = req.body;
 
-  try {
-    const result = await pool.query(
-      'INSERT INTO reports (device_id, user_info) VALUES ($1, $2) RETURNING id',
-      [deviceId, JSON.stringify(userInfo)]
-    );
+    try {
+      const result = await pool.query(
+        "INSERT INTO reports (device_id, user_info) VALUES ($1, $2) RETURNING id",
+        [deviceId, JSON.stringify(userInfo)],
+      );
 
-    logger.info(`Lost device report submitted for ${deviceId}`);
-    res.json({ success: true, reportId: result.rows[0].id });
-  } catch (error) {
-    logger.error('Database error:', error);
-    res.status(500).json({ success: false, error: 'Failed to submit report' });
-  }
-});
+      logger.info(`Lost device report submitted for ${deviceId}`);
+      res.json({ success: true, reportId: result.rows[0].id });
+    } catch (error) {
+      logger.error("Database error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to submit report" });
+    }
+  },
+);
 
 // ========================================
 // Member ID & Payment System
@@ -1119,8 +1481,8 @@ function generateMemberId() {
 
 // Generate secure password (12 chars)
 function generatePassword() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
-  let password = '';
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+  let password = "";
   for (let i = 0; i < 12; i++) {
     password += chars.charAt(crypto.randomInt(chars.length));
   }
@@ -1129,11 +1491,17 @@ function generatePassword() {
 
 // Member JWT auth middleware
 const authenticateMember = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ success: false, error: 'Access token required' });
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token)
+    return res
+      .status(401)
+      .json({ success: false, error: "Access token required" });
   jwt.verify(token, process.env.JWT_SECRET, (err, member) => {
-    if (err) return res.status(403).json({ success: false, error: 'Invalid or expired token' });
+    if (err)
+      return res
+        .status(403)
+        .json({ success: false, error: "Invalid or expired token" });
     req.member = member;
     next();
   });
@@ -1144,110 +1512,216 @@ const authenticateMember = (req, res, next) => {
 // ========================================
 
 // Sign Up
-app.post('/api/auth/signup', [
-  body('name').trim().isLength({ min: 2, max: 100 }).withMessage('Name must be 2-100 characters'),
-  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
-  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  handleValidationErrors
-], async (req, res) => {
-  const { name, email, password } = req.body;
-  try {
-    const existing = await pool.query('SELECT id FROM members WHERE email = $1', [email]);
-    if (existing.rows.length > 0) {
-      return res.status(400).json({ success: false, error: 'An account with this email already exists. Please sign in.' });
+app.post(
+  "/api/auth/signup",
+  [
+    body("name")
+      .trim()
+      .isLength({ min: 2, max: 100 })
+      .withMessage("Name must be 2-100 characters"),
+    body("email")
+      .isEmail()
+      .normalizeEmail()
+      .withMessage("Valid email required"),
+    body("password")
+      .isLength({ min: 6 })
+      .withMessage("Password must be at least 6 characters"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { name, email, password } = req.body;
+    try {
+      const existing = await pool.query(
+        "SELECT id FROM members WHERE email = $1",
+        [email],
+      );
+      if (existing.rows.length > 0) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: "An account with this email already exists. Please sign in.",
+          });
+      }
+
+      let memberId;
+      let isUnique = false;
+      while (!isUnique) {
+        memberId = generateMemberId();
+        const check = await pool.query(
+          "SELECT id FROM members WHERE member_id = $1",
+          [memberId],
+        );
+        if (check.rows.length === 0) isUnique = true;
+      }
+
+      const passwordHash = await bcrypt.hash(password, 12);
+      await pool.query(
+        "INSERT INTO members (member_id, name, email, password_hash, payment_status) VALUES ($1, $2, $3, $4, $5)",
+        [memberId, name, email, passwordHash, "pending"],
+      );
+
+      const token = jwt.sign(
+        { id: memberId, email, name, role: "member" },
+        process.env.JWT_SECRET,
+        { expiresIn: "7d" },
+      );
+      logger.info(`Member signed up: ${email} (${memberId})`);
+      res.json({
+        success: true,
+        token,
+        member: { memberId, name, email, paymentStatus: "pending" },
+      });
+    } catch (error) {
+      logger.error("Signup error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Signup failed. Please try again." });
     }
-
-    let memberId;
-    let isUnique = false;
-    while (!isUnique) {
-      memberId = generateMemberId();
-      const check = await pool.query('SELECT id FROM members WHERE member_id = $1', [memberId]);
-      if (check.rows.length === 0) isUnique = true;
-    }
-
-    const passwordHash = await bcrypt.hash(password, 12);
-    await pool.query(
-      'INSERT INTO members (member_id, name, email, password_hash, payment_status) VALUES ($1, $2, $3, $4, $5)',
-      [memberId, name, email, passwordHash, 'pending']
-    );
-
-    const token = jwt.sign({ id: memberId, email, name, role: 'member' }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    logger.info(`Member signed up: ${email} (${memberId})`);
-    res.json({ success: true, token, member: { memberId, name, email, paymentStatus: 'pending' } });
-  } catch (error) {
-    logger.error('Signup error:', error);
-    res.status(500).json({ success: false, error: 'Signup failed. Please try again.' });
-  }
-});
+  },
+);
 
 // Sign In
-app.post('/api/auth/signin', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
-  body('password').isLength({ min: 1 }).withMessage('Password is required'),
-  handleValidationErrors
-], async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    const result = await pool.query('SELECT member_id, name, email, password_hash, payment_status FROM members WHERE email = $1', [email]);
-    if (result.rows.length === 0) {
-      return res.status(401).json({ success: false, error: 'Invalid email or password.' });
+app.post(
+  "/api/auth/signin",
+  [
+    body("email")
+      .isEmail()
+      .normalizeEmail()
+      .withMessage("Valid email required"),
+    body("password").isLength({ min: 1 }).withMessage("Password is required"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { email, password } = req.body;
+    try {
+      const result = await pool.query(
+        "SELECT member_id, name, email, password_hash, payment_status FROM members WHERE email = $1",
+        [email],
+      );
+      if (result.rows.length === 0) {
+        return res
+          .status(401)
+          .json({ success: false, error: "Invalid email or password." });
+      }
+      const member = result.rows[0];
+      if (!member.password_hash) {
+        return res
+          .status(401)
+          .json({
+            success: false,
+            error:
+              "This account was created before sign-in was available. Please use Forgot Password to set a password.",
+          });
+      }
+      const valid = await bcrypt.compare(password, member.password_hash);
+      if (!valid) {
+        return res
+          .status(401)
+          .json({ success: false, error: "Invalid email or password." });
+      }
+      const token = jwt.sign(
+        {
+          id: member.member_id,
+          email: member.email,
+          name: member.name,
+          role: "member",
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: "7d" },
+      );
+      logger.info(`Member signed in: ${email}`);
+      res.json({
+        success: true,
+        token,
+        member: {
+          memberId: member.member_id,
+          name: member.name,
+          email: member.email,
+          paymentStatus: member.payment_status,
+        },
+      });
+    } catch (error) {
+      logger.error("Signin error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Sign in failed. Please try again." });
     }
-    const member = result.rows[0];
-    if (!member.password_hash) {
-      return res.status(401).json({ success: false, error: 'This account was created before sign-in was available. Please use Forgot Password to set a password.' });
-    }
-    const valid = await bcrypt.compare(password, member.password_hash);
-    if (!valid) {
-      return res.status(401).json({ success: false, error: 'Invalid email or password.' });
-    }
-    const token = jwt.sign({ id: member.member_id, email: member.email, name: member.name, role: 'member' }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    logger.info(`Member signed in: ${email}`);
-    res.json({ success: true, token, member: { memberId: member.member_id, name: member.name, email: member.email, paymentStatus: member.payment_status } });
-  } catch (error) {
-    logger.error('Signin error:', error);
-    res.status(500).json({ success: false, error: 'Sign in failed. Please try again.' });
-  }
-});
+  },
+);
 
 // Get current member profile
-app.get('/api/auth/me', authenticateMember, async (req, res) => {
+app.get("/api/auth/me", authenticateMember, async (req, res) => {
   try {
-    const result = await pool.query('SELECT member_id, name, email, payment_status FROM members WHERE member_id = $1', [req.member.id]);
-    if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Member not found' });
+    const result = await pool.query(
+      "SELECT member_id, name, email, payment_status FROM members WHERE member_id = $1",
+      [req.member.id],
+    );
+    if (result.rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, error: "Member not found" });
     const m = result.rows[0];
-    res.json({ success: true, member: { memberId: m.member_id, name: m.name, email: m.email, paymentStatus: m.payment_status } });
+    res.json({
+      success: true,
+      member: {
+        memberId: m.member_id,
+        name: m.name,
+        email: m.email,
+        paymentStatus: m.payment_status,
+      },
+    });
   } catch (error) {
-    logger.error('Get profile error:', error);
-    res.status(500).json({ success: false, error: 'Failed to get profile' });
+    logger.error("Get profile error:", error);
+    res.status(500).json({ success: false, error: "Failed to get profile" });
   }
 });
 
 // Forgot Password - send reset link via email
-app.post('/api/auth/forgot-password', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
-  handleValidationErrors
-], async (req, res) => {
-  const { email } = req.body;
-  try {
-    const member = await pool.query('SELECT id FROM members WHERE email = $1', [email]);
-    // Always return success to prevent email enumeration
-    if (member.rows.length === 0) {
-      return res.json({ success: true, message: 'If an account exists with that email, a reset link has been sent.' });
-    }
+app.post(
+  "/api/auth/forgot-password",
+  [
+    body("email")
+      .isEmail()
+      .normalizeEmail()
+      .withMessage("Valid email required"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { email } = req.body;
+    try {
+      const member = await pool.query(
+        "SELECT id FROM members WHERE email = $1",
+        [email],
+      );
+      // Always return success to prevent email enumeration
+      if (member.rows.length === 0) {
+        return res.json({
+          success: true,
+          message:
+            "If an account exists with that email, a reset link has been sent.",
+        });
+      }
 
-    // Invalidate old tokens
-    await pool.query('UPDATE password_reset_tokens SET used = TRUE WHERE email = $1 AND used = FALSE', [email]);
+      // Invalidate old tokens
+      await pool.query(
+        "UPDATE password_reset_tokens SET used = TRUE WHERE email = $1 AND used = FALSE",
+        [email],
+      );
 
-    const token = crypto.randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-    await pool.query('INSERT INTO password_reset_tokens (email, token, expires_at) VALUES ($1, $2, $3)', [email, token, expiresAt]);
+      const token = crypto.randomBytes(32).toString("hex");
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+      await pool.query(
+        "INSERT INTO password_reset_tokens (email, token, expires_at) VALUES ($1, $2, $3)",
+        [email, token, expiresAt],
+      );
 
-    const resetUrl = `${process.env.API_BASE_URL || 'https://ysecurity.app'}/reset-password?token=${token}`;
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
-      to: email,
-      subject: 'Ysecurity - Reset Your Password',
-      html: `
+      const resetUrl = `${process.env.API_BASE_URL || "https://ysecurity.app"}/reset-password?token=${token}`;
+      const mailOptions = {
+        from: process.env.EMAIL_USER,
+        to: email,
+        subject: "Ysecurity - Reset Your Password",
+        html: `
         <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px;">
           <h2 style="color:#1a73e8;">🛡️ Ysecurity Password Reset</h2>
           <p>You requested a password reset. Click the button below to set a new password:</p>
@@ -1258,100 +1732,160 @@ app.post('/api/auth/forgot-password', [
           <hr style="border:none;border-top:1px solid #e8eaed;margin:24px 0;">
           <p style="color:#5f6368;font-size:0.8rem;">Ysecurity - Smart Device Security</p>
         </div>
-      `
-    };
-    transporter.sendMail(mailOptions).catch(err => logger.error('Reset email error:', err));
+      `,
+      };
+      transporter
+        .sendMail(mailOptions)
+        .catch((err) => logger.error("Reset email error:", err));
 
-    logger.info(`Password reset requested for ${email}`);
-    res.json({ success: true, message: 'If an account exists with that email, a reset link has been sent.' });
-  } catch (error) {
-    logger.error('Forgot password error:', error);
-    res.status(500).json({ success: false, error: 'Failed to process request. Please try again.' });
-  }
-});
+      logger.info(`Password reset requested for ${email}`);
+      res.json({
+        success: true,
+        message:
+          "If an account exists with that email, a reset link has been sent.",
+      });
+    } catch (error) {
+      logger.error("Forgot password error:", error);
+      res
+        .status(500)
+        .json({
+          success: false,
+          error: "Failed to process request. Please try again.",
+        });
+    }
+  },
+);
 
 // Reset Password - verify token and set new password
-app.post('/api/auth/reset-password', [
-  body('token').isLength({ min: 64, max: 64 }).withMessage('Invalid reset token'),
-  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  handleValidationErrors
-], async (req, res) => {
-  const { token, password } = req.body;
-  try {
-    const result = await pool.query(
-      'SELECT email, expires_at FROM password_reset_tokens WHERE token = $1 AND used = FALSE',
-      [token]
-    );
-    if (result.rows.length === 0) {
-      return res.status(400).json({ success: false, error: 'Invalid or expired reset link. Please request a new one.' });
-    }
-    const { email, expires_at } = result.rows[0];
-    if (new Date(expires_at) < new Date()) {
-      await pool.query('UPDATE password_reset_tokens SET used = TRUE WHERE token = $1', [token]);
-      return res.status(400).json({ success: false, error: 'This reset link has expired. Please request a new one.' });
-    }
+app.post(
+  "/api/auth/reset-password",
+  [
+    body("token")
+      .isLength({ min: 64, max: 64 })
+      .withMessage("Invalid reset token"),
+    body("password")
+      .isLength({ min: 6 })
+      .withMessage("Password must be at least 6 characters"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { token, password } = req.body;
+    try {
+      const result = await pool.query(
+        "SELECT email, expires_at FROM password_reset_tokens WHERE token = $1 AND used = FALSE",
+        [token],
+      );
+      if (result.rows.length === 0) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: "Invalid or expired reset link. Please request a new one.",
+          });
+      }
+      const { email, expires_at } = result.rows[0];
+      if (new Date(expires_at) < new Date()) {
+        await pool.query(
+          "UPDATE password_reset_tokens SET used = TRUE WHERE token = $1",
+          [token],
+        );
+        return res
+          .status(400)
+          .json({
+            success: false,
+            error: "This reset link has expired. Please request a new one.",
+          });
+      }
 
-    const passwordHash = await bcrypt.hash(password, 12);
-    await pool.query('UPDATE members SET password_hash = $1 WHERE email = $2', [passwordHash, email]);
-    await pool.query('UPDATE password_reset_tokens SET used = TRUE WHERE token = $1', [token]);
+      const passwordHash = await bcrypt.hash(password, 12);
+      await pool.query(
+        "UPDATE members SET password_hash = $1 WHERE email = $2",
+        [passwordHash, email],
+      );
+      await pool.query(
+        "UPDATE password_reset_tokens SET used = TRUE WHERE token = $1",
+        [token],
+      );
 
-    logger.info(`Password reset completed for ${email}`);
-    res.json({ success: true, message: 'Password has been reset. You can now sign in.' });
-  } catch (error) {
-    logger.error('Reset password error:', error);
-    res.status(500).json({ success: false, error: 'Failed to reset password. Please try again.' });
-  }
-});
+      logger.info(`Password reset completed for ${email}`);
+      res.json({
+        success: true,
+        message: "Password has been reset. You can now sign in.",
+      });
+    } catch (error) {
+      logger.error("Reset password error:", error);
+      res
+        .status(500)
+        .json({
+          success: false,
+          error: "Failed to reset password. Please try again.",
+        });
+    }
+  },
+);
 
 // ========================================
 // DEV/TEST: Create member without payment (REMOVE BEFORE LAUNCH)
 // ========================================
-app.post('/api/dev/create-member', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
-  handleValidationErrors
-], async (req, res) => {
-  const { email } = req.body;
-  try {
-    const existing = await pool.query(
-      'SELECT member_id FROM members WHERE email = $1 AND payment_status = $2',
-      [email, 'completed']
-    );
-    if (existing.rows.length > 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Email already has a membership: ' + existing.rows[0].member_id
-      });
+app.post(
+  "/api/dev/create-member",
+  [
+    body("email")
+      .isEmail()
+      .normalizeEmail()
+      .withMessage("Valid email required"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { email } = req.body;
+    try {
+      const existing = await pool.query(
+        "SELECT member_id FROM members WHERE email = $1 AND payment_status = $2",
+        [email, "completed"],
+      );
+      if (existing.rows.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "Email already has a membership: " + existing.rows[0].member_id,
+        });
+      }
+
+      let memberId;
+      let isUnique = false;
+      while (!isUnique) {
+        memberId = generateMemberId();
+        const check = await pool.query(
+          "SELECT id FROM members WHERE member_id = $1",
+          [memberId],
+        );
+        if (check.rows.length === 0) isUnique = true;
+      }
+
+      await pool.query(
+        "INSERT INTO members (member_id, email, payment_status) VALUES ($1, $2, $3) ON CONFLICT (email) DO UPDATE SET member_id = $1, payment_status = $3",
+        [memberId, email, "completed"],
+      );
+
+      logger.info(`[DEV] Test member created: ${memberId} for ${email}`);
+      res.json({ success: true, memberId, email });
+    } catch (error) {
+      logger.error("[DEV] Create member error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to create test member" });
     }
-
-    let memberId;
-    let isUnique = false;
-    while (!isUnique) {
-      memberId = generateMemberId();
-      const check = await pool.query('SELECT id FROM members WHERE member_id = $1', [memberId]);
-      if (check.rows.length === 0) isUnique = true;
-    }
-
-    await pool.query(
-      'INSERT INTO members (member_id, email, payment_status) VALUES ($1, $2, $3) ON CONFLICT (email) DO UPDATE SET member_id = $1, payment_status = $3',
-      [memberId, email, 'completed']
-    );
-
-    logger.info(`[DEV] Test member created: ${memberId} for ${email}`);
-    res.json({ success: true, memberId, email });
-  } catch (error) {
-    logger.error('[DEV] Create member error:', error);
-    res.status(500).json({ success: false, error: 'Failed to create test member' });
-  }
-});
+  },
+);
 
 // Create Stripe checkout session for membership (PRODUCTION)
 // Accepts either: logged-in user (Bearer token) OR email in body
-app.post('/api/members/create-checkout', async (req, res) => {
+app.post("/api/members/create-checkout", async (req, res) => {
   let email;
 
   // Check if user is authenticated (signed in)
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
   if (token) {
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -1367,24 +1901,35 @@ app.post('/api/members/create-checkout', async (req, res) => {
   }
 
   if (!email) {
-    return res.status(400).json({ success: false, error: 'Email is required. Please sign in or provide an email.' });
+    return res
+      .status(400)
+      .json({
+        success: false,
+        error: "Email is required. Please sign in or provide an email.",
+      });
   }
 
   try {
     // Check if email already has a completed membership
     const existing = await pool.query(
-      'SELECT member_id FROM members WHERE email = $1 AND payment_status = $2',
-      [email, 'completed']
+      "SELECT member_id FROM members WHERE email = $1 AND payment_status = $2",
+      [email, "completed"],
     );
     if (existing.rows.length > 0) {
       return res.status(400).json({
         success: false,
-        error: 'This email already has an active membership (Member ID: ' + existing.rows[0].member_id + '). Check your email for your Member ID.'
+        error:
+          "This email already has an active membership (Member ID: " +
+          existing.rows[0].member_id +
+          "). Check your email for your Member ID.",
       });
     }
 
     // Check if member already exists (signed up but not paid)
-    const memberRow = await pool.query('SELECT member_id FROM members WHERE email = $1', [email]);
+    const memberRow = await pool.query(
+      "SELECT member_id FROM members WHERE email = $1",
+      [email],
+    );
     let memberId;
     if (memberRow.rows.length > 0) {
       memberId = memberRow.rows[0].member_id;
@@ -1392,74 +1937,89 @@ app.post('/api/members/create-checkout', async (req, res) => {
       let isUnique = false;
       while (!isUnique) {
         memberId = generateMemberId();
-        const check = await pool.query('SELECT id FROM members WHERE member_id = $1', [memberId]);
+        const check = await pool.query(
+          "SELECT id FROM members WHERE member_id = $1",
+          [memberId],
+        );
         if (check.rows.length === 0) isUnique = true;
       }
     }
 
     // Create Stripe checkout session
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: [{
-        price: process.env.STRIPE_MEMBERSHIP_PRICE_ID,
-        quantity: 1,
-      }],
-      mode: 'payment',
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price: process.env.STRIPE_MEMBERSHIP_PRICE_ID,
+          quantity: 1,
+        },
+      ],
+      mode: "payment",
       customer_email: email,
-      success_url: `${process.env.API_BASE_URL || 'https://ysecurity.app'}/payment?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.API_BASE_URL || 'https://ysecurity.app'}/payment`,
+      success_url: `${process.env.API_BASE_URL || "https://ysecurity.app"}/payment?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.API_BASE_URL || "https://ysecurity.app"}/payment`,
       metadata: {
-        memberId: memberId
-      }
+        memberId: memberId,
+      },
     });
 
     // Update or insert member record with stripe session
     await pool.query(
-      'INSERT INTO members (member_id, email, stripe_session_id, payment_status) VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO UPDATE SET stripe_session_id = $3, payment_status = $4',
-      [memberId, email, session.id, 'pending']
+      "INSERT INTO members (member_id, email, stripe_session_id, payment_status) VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO UPDATE SET stripe_session_id = $3, payment_status = $4",
+      [memberId, email, session.id, "pending"],
     );
 
-    logger.info(`Checkout session created for ${email}, member ID: ${memberId}`);
+    logger.info(
+      `Checkout session created for ${email}, member ID: ${memberId}`,
+    );
     res.json({ success: true, sessionId: session.id, url: session.url });
   } catch (error) {
-    logger.error('Checkout creation error:', error);
-    res.status(500).json({ success: false, error: 'Failed to create checkout session' });
+    logger.error("Checkout creation error:", error);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to create checkout session" });
   }
 });
 
 // Verify payment and return member ID
-app.get('/api/members/verify-payment', async (req, res) => {
+app.get("/api/members/verify-payment", async (req, res) => {
   const sessionId = req.query.session_id;
 
-  if (!sessionId || typeof sessionId !== 'string' || sessionId.length > 200) {
-    return res.status(400).json({ success: false, error: 'Invalid session ID' });
+  if (!sessionId || typeof sessionId !== "string" || sessionId.length > 200) {
+    return res
+      .status(400)
+      .json({ success: false, error: "Invalid session ID" });
   }
 
   try {
     // Get session from Stripe
     const session = await stripe.checkout.sessions.retrieve(sessionId);
 
-    if (session.payment_status !== 'paid') {
-      return res.status(400).json({ success: false, error: 'Payment not completed' });
+    if (session.payment_status !== "paid") {
+      return res
+        .status(400)
+        .json({ success: false, error: "Payment not completed" });
     }
 
     // Find member by stripe session ID
     const result = await pool.query(
-      'SELECT member_id, email, payment_status FROM members WHERE stripe_session_id = $1',
-      [sessionId]
+      "SELECT member_id, email, payment_status FROM members WHERE stripe_session_id = $1",
+      [sessionId],
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Member record not found' });
+      return res
+        .status(404)
+        .json({ success: false, error: "Member record not found" });
     }
 
     const member = result.rows[0];
 
     // Update payment status if still pending
-    if (member.payment_status !== 'completed') {
+    if (member.payment_status !== "completed") {
       await pool.query(
-        'UPDATE members SET payment_status = $1, stripe_payment_id = $2 WHERE stripe_session_id = $3',
-        ['completed', session.payment_intent, sessionId]
+        "UPDATE members SET payment_status = $1, stripe_payment_id = $2 WHERE stripe_session_id = $3",
+        ["completed", session.payment_intent, sessionId],
       );
 
       // Send Member ID email
@@ -1467,7 +2027,7 @@ app.get('/api/members/verify-payment', async (req, res) => {
         const mailOptions = {
           from: process.env.EMAIL_USER,
           to: member.email,
-          subject: 'Your Ysecurity Member ID',
+          subject: "Your Ysecurity Member ID",
           html: `
             <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px;">
               <h2 style="color:#1a73e8;">🛡️ Welcome to Ysecurity!</h2>
@@ -1488,22 +2048,24 @@ app.get('/api/members/verify-payment', async (req, res) => {
               <hr style="border:none;border-top:1px solid #e8eaed;margin:24px 0;">
               <p style="color:#5f6368;font-size:0.8rem;">Ysecurity - Smart Device Security<br>https://ysecurity.app</p>
             </div>
-          `
+          `,
         };
         transporter.sendMail(mailOptions);
       } catch (emailErr) {
-        logger.error('Failed to send Member ID email:', emailErr);
+        logger.error("Failed to send Member ID email:", emailErr);
       }
     }
 
     res.json({
       success: true,
       memberId: member.member_id,
-      email: member.email
+      email: member.email,
     });
   } catch (error) {
-    logger.error('Payment verification error:', error);
-    res.status(500).json({ success: false, error: 'Payment verification failed' });
+    logger.error("Payment verification error:", error);
+    res
+      .status(500)
+      .json({ success: false, error: "Payment verification failed" });
   }
 });
 
@@ -1512,359 +2074,569 @@ app.get('/api/members/verify-payment', async (req, res) => {
 // ========================================
 
 // Get all members (admin) - Member ID is NOT exposed for privacy
-app.get('/api/admin/members', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
+app.get("/api/admin/members", authenticateToken, async (req, res) => {
+  if (req.user.role !== "admin") {
+    return res
+      .status(403)
+      .json({ success: false, error: "Admin access required" });
   }
   try {
     const result = await pool.query(
-      'SELECT m.id, m.name, m.email, m.payment_status, m.created_at, d.id as device_id, d.status as device_status FROM members m LEFT JOIN devices d ON d.member_id = m.member_id ORDER BY m.created_at DESC'
+      "SELECT m.id, m.name, m.email, m.payment_status, m.created_at, d.id as device_id, d.status as device_status FROM members m LEFT JOIN devices d ON d.member_id = m.member_id ORDER BY m.created_at DESC",
     );
     res.json({ success: true, members: result.rows });
   } catch (error) {
-    logger.error('Failed to fetch members:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch members' });
+    logger.error("Failed to fetch members:", error);
+    res.status(500).json({ success: false, error: "Failed to fetch members" });
   }
 });
 
 // Activate device by Member ID (admin) - user must provide their Member ID to admin
-app.post('/api/admin/devices/activate', [
-  authenticateToken,
-  body('memberId').matches(/^YS-\d{6,15}$/).withMessage('Valid Member ID required (format: YS-XXXXXX)'),
-  handleValidationErrors
-], async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
-  const { memberId } = req.body;
-
-  try {
-    // Find device linked to this member ID
-    const device = await pool.query(
-      'SELECT id, status FROM devices WHERE member_id = $1',
-      [memberId]
-    );
-    if (device.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'No device found for this Member ID. The member may not have installed the app yet.' });
+app.post(
+  "/api/admin/devices/activate",
+  [
+    authenticateToken,
+    body("memberId")
+      .matches(/^YS-\d+$/)
+      .withMessage("Valid Member ID required"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
     }
-    if (device.rows[0].status === 'active') {
-      return res.status(400).json({ success: false, error: 'Device is already active' });
+    const { memberId } = req.body;
+
+    try {
+      // Find device linked to this member ID
+      const device = await pool.query(
+        "SELECT id, status FROM devices WHERE member_id = $1",
+        [memberId],
+      );
+      if (device.rows.length === 0) {
+        return res
+          .status(404)
+          .json({
+            success: false,
+            error:
+              "No device found for this Member ID. The member may not have installed the app yet.",
+          });
+      }
+      if (device.rows[0].status === "active") {
+        return res
+          .status(400)
+          .json({ success: false, error: "Device is already active" });
+      }
+
+      await pool.query(
+        "UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE member_id = $2",
+        ["active", memberId],
+      );
+
+      await logDeviceActivity(
+        device.rows[0].id,
+        "activated",
+        `Activated by admin ${req.user.username}`,
+      );
+      logger.info(
+        `Device ${device.rows[0].id} activated by admin ${req.user.username} using member ID ${memberId}`,
+      );
+      res.json({
+        success: true,
+        message: "Device activated successfully",
+        deviceId: device.rows[0].id,
+      });
+    } catch (error) {
+      logger.error("Activation error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to activate device" });
     }
-
-    await pool.query(
-      'UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE member_id = $2',
-      ['active', memberId]
-    );
-
-    await logDeviceActivity(device.rows[0].id, 'activated', `Activated by admin ${req.user.username}`);
-    logger.info(`Device ${device.rows[0].id} activated by admin ${req.user.username} using member ID ${memberId}`);
-    res.json({ success: true, message: 'Device activated successfully', deviceId: device.rows[0].id });
-  } catch (error) {
-    logger.error('Activation error:', error);
-    res.status(500).json({ success: false, error: 'Failed to activate device' });
-  }
-});
+  },
+);
 
 // Deactivate device by Member ID (admin)
-app.post('/api/admin/devices/deactivate', [
-  authenticateToken,
-  body('memberId').matches(/^YS-\d{6,15}$/).withMessage('Valid Member ID required (format: YS-XXXXXX)'),
-  handleValidationErrors
-], async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
-  const { memberId } = req.body;
-
-  try {
-    const result = await pool.query(
-      'UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE member_id = $2',
-      ['installed', memberId]
-    );
-    if (result.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'No device found for this Member ID' });
+app.post(
+  "/api/admin/devices/deactivate",
+  [
+    authenticateToken,
+    body("memberId")
+      .matches(/^YS-\d+$/)
+      .withMessage("Valid Member ID required"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
     }
-    logger.info(`Device deactivated by admin ${req.user.username} using member ID ${memberId}`);
-    res.json({ success: true, message: 'Device deactivated' });
-  } catch (error) {
-    logger.error('Deactivation error:', error);
-    res.status(500).json({ success: false, error: 'Failed to deactivate device' });
-  }
-});
+    const { memberId } = req.body;
+
+    try {
+      const result = await pool.query(
+        "UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE member_id = $2",
+        ["installed", memberId],
+      );
+      if (result.rowCount === 0) {
+        return res
+          .status(404)
+          .json({
+            success: false,
+            error: "No device found for this Member ID",
+          });
+      }
+      logger.info(
+        `Device deactivated by admin ${req.user.username} using member ID ${memberId}`,
+      );
+      res.json({ success: true, message: "Device deactivated" });
+    } catch (error) {
+      logger.error("Deactivation error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to deactivate device" });
+    }
+  },
+);
 
 // Reset/delete a device only (admin) - keeps the member account
-app.delete('/api/admin/devices/:deviceId', [
-  authenticateToken,
-  param('deviceId').isLength({ min: 5, max: 100 }).withMessage('Invalid device ID'),
-  handleValidationErrors
-], async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
-  const { deviceId } = req.params;
-
-  try {
-    const device = await pool.query('SELECT id, member_id FROM devices WHERE id = $1', [deviceId]);
-    if (device.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Device not found' });
+app.delete(
+  "/api/admin/devices/:deviceId",
+  [
+    authenticateToken,
+    param("deviceId")
+      .isLength({ min: 5, max: 100 })
+      .withMessage("Invalid device ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
     }
+    const { deviceId } = req.params;
 
-    // Delete device (cascades to commands, location_pings via FK)
-    await pool.query('DELETE FROM devices WHERE id = $1', [deviceId]);
+    try {
+      const device = await pool.query(
+        "SELECT id, member_id FROM devices WHERE id = $1",
+        [deviceId],
+      );
+      if (device.rows.length === 0) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Device not found" });
+      }
 
-    logger.info(`Device ${deviceId} deleted by admin ${req.user.username}`);
-    res.json({ success: true, message: 'Device deleted. Member can re-register a new device.' });
-  } catch (error) {
-    logger.error('Device delete error:', error);
-    res.status(500).json({ success: false, error: 'Failed to delete device' });
-  }
-});
+      // Delete device (cascades to commands, location_pings via FK)
+      await pool.query("DELETE FROM devices WHERE id = $1", [deviceId]);
+
+      logger.info(`Device ${deviceId} deleted by admin ${req.user.username}`);
+      res.json({
+        success: true,
+        message: "Device deleted. Member can re-register a new device.",
+      });
+    } catch (error) {
+      logger.error("Device delete error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to delete device" });
+    }
+  },
+);
 
 // Delete member and their device (admin) - for when user loses their ID
-app.delete('/api/admin/members/:memberId', [
-  authenticateToken,
-  param('memberId').matches(/^YS-\d{6,15}$/).withMessage('Valid Member ID required'),
-  handleValidationErrors
-], async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
-  const { memberId } = req.params;
-
-  try {
-    // Delete device first (cascades to location_pings, commands, etc.)
-    const device = await pool.query('SELECT id FROM devices WHERE member_id = $1', [memberId]);
-    if (device.rows.length > 0) {
-      await pool.query('DELETE FROM devices WHERE member_id = $1', [memberId]);
-      logger.info(`Device ${device.rows[0].id} deleted for member ${memberId}`);
+app.delete(
+  "/api/admin/members/:memberId",
+  [
+    authenticateToken,
+    param("memberId")
+      .matches(/^YS-\d+$/)
+      .withMessage("Valid Member ID required"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
     }
+    const { memberId } = req.params;
 
-    // Delete member record
-    const result = await pool.query('DELETE FROM members WHERE member_id = $1', [memberId]);
-    if (result.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Member not found' });
+    try {
+      // Delete device first (cascades to location_pings, commands, etc.)
+      const device = await pool.query(
+        "SELECT id FROM devices WHERE member_id = $1",
+        [memberId],
+      );
+      if (device.rows.length > 0) {
+        await pool.query("DELETE FROM devices WHERE member_id = $1", [
+          memberId,
+        ]);
+        logger.info(
+          `Device ${device.rows[0].id} deleted for member ${memberId}`,
+        );
+      }
+
+      // Delete member record
+      const result = await pool.query(
+        "DELETE FROM members WHERE member_id = $1",
+        [memberId],
+      );
+      if (result.rowCount === 0) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Member not found" });
+      }
+
+      logger.info(
+        `Member ${memberId} and associated device deleted by admin ${req.user.username}`,
+      );
+      res.json({
+        success: true,
+        message:
+          "Member and device deleted. User can reinstall and create a new membership.",
+      });
+    } catch (error) {
+      logger.error("Delete error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to delete member" });
     }
-
-    logger.info(`Member ${memberId} and associated device deleted by admin ${req.user.username}`);
-    res.json({ success: true, message: 'Member and device deleted. User can reinstall and create a new membership.' });
-  } catch (error) {
-    logger.error('Delete error:', error);
-    res.status(500).json({ success: false, error: 'Failed to delete member' });
-  }
-});
+  },
+);
 
 // =============================================
 // DEVICE DIRECTORY API ENDPOINTS
 // =============================================
 
 // Get device detail with folder counts
-app.get('/api/admin/devices/:deviceId/directory', [
-  authenticateToken,
-  param('deviceId').isLength({ min: 5, max: 100 }).withMessage('Invalid device ID'),
-  handleValidationErrors
-], async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
-  const { deviceId } = req.params;
-
-  try {
-    const device = await pool.query('SELECT * FROM devices WHERE id = $1', [deviceId]);
-    if (device.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Device not found' });
+app.get(
+  "/api/admin/devices/:deviceId/directory",
+  [
+    authenticateToken,
+    param("deviceId")
+      .isLength({ min: 5, max: 100 })
+      .withMessage("Invalid device ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
     }
+    const { deviceId } = req.params;
 
-    const [photosCount, locationsCount, activityCount, installLocation, latestLocation, activeGeofence] = await Promise.all([
-      pool.query('SELECT COUNT(*)::int as count FROM device_photos WHERE device_id = $1', [deviceId]),
-      pool.query('SELECT COUNT(*)::int as count FROM location_pings WHERE device_id = $1', [deviceId]),
-      pool.query('SELECT COUNT(*)::int as count FROM device_activity WHERE device_id = $1', [deviceId]),
-      pool.query('SELECT latitude, longitude, timestamp FROM location_pings WHERE device_id = $1 ORDER BY timestamp ASC LIMIT 1', [deviceId]),
-      pool.query('SELECT latitude, longitude, battery, network_type, accuracy, timestamp FROM location_pings WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 1', [deviceId]),
-      pool.query('SELECT params FROM commands WHERE device_id = $1 AND command = $2 ORDER BY created_at DESC LIMIT 1', [deviceId, 'geofence']),
-    ]);
+    try {
+      const device = await pool.query("SELECT * FROM devices WHERE id = $1", [
+        deviceId,
+      ]);
+      if (device.rows.length === 0) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Device not found" });
+      }
 
-    // Get latest network info from most recent ping
-    const latestPing = latestLocation;
+      const [
+        photosCount,
+        locationsCount,
+        activityCount,
+        installLocation,
+        latestLocation,
+        activeGeofence,
+      ] = await Promise.all([
+        pool.query(
+          "SELECT COUNT(*)::int as count FROM device_photos WHERE device_id = $1",
+          [deviceId],
+        ),
+        pool.query(
+          "SELECT COUNT(*)::int as count FROM location_pings WHERE device_id = $1",
+          [deviceId],
+        ),
+        pool.query(
+          "SELECT COUNT(*)::int as count FROM device_activity WHERE device_id = $1",
+          [deviceId],
+        ),
+        pool.query(
+          "SELECT latitude, longitude, timestamp, ip_address FROM location_pings WHERE device_id = $1 ORDER BY timestamp ASC LIMIT 1",
+          [deviceId],
+        ),
+        pool.query(
+          "SELECT latitude, longitude, battery, network_type, accuracy, timestamp, ip_address FROM location_pings WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 1",
+          [deviceId],
+        ),
+        pool.query(
+          "SELECT params FROM commands WHERE device_id = $1 AND command = $2 ORDER BY created_at DESC LIMIT 1",
+          [deviceId, "geofence"],
+        ),
+      ]);
 
-    res.json({
-      success: true,
-      device: device.rows[0],
-      folders: {
-        pictures: photosCount.rows[0].count,
-        location: locationsCount.rows[0].count,
-        network: latestPing.rows.length > 0 ? 1 : 0,
-        activity: activityCount.rows[0].count,
-      },
-      installLocation: installLocation.rows[0] || null,
-      latestLocation: latestLocation.rows[0] || null,
-      latestNetwork: latestPing.rows[0] || null,
-      geofence: activeGeofence.rows[0] ? (typeof activeGeofence.rows[0].params === 'string' ? JSON.parse(activeGeofence.rows[0].params) : activeGeofence.rows[0].params) : null,
-    });
-  } catch (error) {
-    logger.error('Device directory error:', error);
-    res.status(500).json({ success: false, error: 'Failed to load device directory' });
-  }
-});
+      // Get latest network info from most recent ping
+      const latestPing = latestLocation;
+
+      res.json({
+        success: true,
+        device: device.rows[0],
+        folders: {
+          pictures: photosCount.rows[0].count,
+          location: locationsCount.rows[0].count,
+          network: latestPing.rows.length > 0 ? 1 : 0,
+          activity: activityCount.rows[0].count,
+        },
+        installLocation: installLocation.rows[0] || null,
+        latestLocation: latestLocation.rows[0] || null,
+        latestNetwork: latestPing.rows[0] || null,
+        geofence: activeGeofence.rows[0]
+          ? typeof activeGeofence.rows[0].params === "string"
+            ? JSON.parse(activeGeofence.rows[0].params)
+            : activeGeofence.rows[0].params
+          : null,
+      });
+    } catch (error) {
+      logger.error("Device directory error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to load device directory" });
+    }
+  },
+);
 
 // Get device photos
-app.get('/api/admin/devices/:deviceId/photos', [
-  authenticateToken,
-  param('deviceId').isLength({ min: 5, max: 100 }).withMessage('Invalid device ID'),
-  handleValidationErrors
-], async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
-  const { deviceId } = req.params;
+app.get(
+  "/api/admin/devices/:deviceId/photos",
+  [
+    authenticateToken,
+    param("deviceId")
+      .isLength({ min: 5, max: 100 })
+      .withMessage("Invalid device ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
+    }
+    const { deviceId } = req.params;
 
-  try {
-    const result = await pool.query(
-      'SELECT id, filename, file_size, source, created_at FROM device_photos WHERE device_id = $1 ORDER BY created_at DESC LIMIT 100',
-      [deviceId]
-    );
-    res.json({ success: true, photos: result.rows });
-  } catch (error) {
-    logger.error('Photos fetch error:', error);
-    res.status(500).json({ success: false, error: 'Failed to load photos' });
-  }
-});
+    try {
+      const result = await pool.query(
+        "SELECT id, filename, file_size, source, created_at FROM device_photos WHERE device_id = $1 ORDER BY created_at DESC LIMIT 100",
+        [deviceId],
+      );
+      res.json({ success: true, photos: result.rows });
+    } catch (error) {
+      logger.error("Photos fetch error:", error);
+      res.status(500).json({ success: false, error: "Failed to load photos" });
+    }
+  },
+);
 
 // Serve device photo file (accepts token in query string for img src)
-app.get('/api/admin/devices/:deviceId/photos/:photoId/file', [
-  param('deviceId').isLength({ min: 5, max: 100 }).withMessage('Invalid device ID'),
-  param('photoId').isInt({ min: 1 }).withMessage('Invalid photo ID'),
-  handleValidationErrors
-], async (req, res) => {
-  // Accept token from Authorization header or query string
-  const token = req.query.token || (req.headers.authorization && req.headers.authorization.split(' ')[1]);
-  if (!token) {
-    return res.status(401).json({ success: false, error: 'Authentication required' });
-  }
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    if (decoded.role !== 'admin') {
-      return res.status(403).json({ success: false, error: 'Admin access required' });
+app.get(
+  "/api/admin/devices/:deviceId/photos/:photoId/file",
+  [
+    param("deviceId")
+      .isLength({ min: 5, max: 100 })
+      .withMessage("Invalid device ID"),
+    param("photoId").isInt({ min: 1 }).withMessage("Invalid photo ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    // Accept token from Authorization header or query string
+    const token =
+      req.query.token ||
+      (req.headers.authorization && req.headers.authorization.split(" ")[1]);
+    if (!token) {
+      return res
+        .status(401)
+        .json({ success: false, error: "Authentication required" });
     }
-  } catch (err) {
-    return res.status(401).json({ success: false, error: 'Invalid token' });
-  }
-  const { deviceId, photoId } = req.params;
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      if (decoded.role !== "admin") {
+        return res
+          .status(403)
+          .json({ success: false, error: "Admin access required" });
+      }
+    } catch (err) {
+      return res.status(401).json({ success: false, error: "Invalid token" });
+    }
+    const { deviceId, photoId } = req.params;
 
-  try {
-    const result = await pool.query(
-      'SELECT file_path FROM device_photos WHERE id = $1 AND device_id = $2',
-      [photoId, deviceId]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Photo not found' });
+    try {
+      const result = await pool.query(
+        "SELECT file_path FROM device_photos WHERE id = $1 AND device_id = $2",
+        [photoId, deviceId],
+      );
+      if (result.rows.length === 0) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Photo not found" });
+      }
+      const filePath = path.join(__dirname, result.rows[0].file_path);
+      if (!fs.existsSync(filePath)) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Photo file not found" });
+      }
+      res.sendFile(filePath);
+    } catch (error) {
+      logger.error("Photo file error:", error);
+      res.status(500).json({ success: false, error: "Failed to serve photo" });
     }
-    const filePath = path.join(__dirname, result.rows[0].file_path);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ success: false, error: 'Photo file not found' });
-    }
-    res.sendFile(filePath);
-  } catch (error) {
-    logger.error('Photo file error:', error);
-    res.status(500).json({ success: false, error: 'Failed to serve photo' });
-  }
-});
+  },
+);
 
 // Get device activity logs
-app.get('/api/admin/devices/:deviceId/activity', [
-  authenticateToken,
-  param('deviceId').isLength({ min: 5, max: 100 }).withMessage('Invalid device ID'),
-  handleValidationErrors
-], async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
-  const { deviceId } = req.params;
+app.get(
+  "/api/admin/devices/:deviceId/activity",
+  [
+    authenticateToken,
+    param("deviceId")
+      .isLength({ min: 5, max: 100 })
+      .withMessage("Invalid device ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
+    }
+    const { deviceId } = req.params;
 
-  try {
-    const result = await pool.query(
-      'SELECT id, action, details, created_at FROM device_activity WHERE device_id = $1 ORDER BY created_at DESC LIMIT 200',
-      [deviceId]
-    );
-    res.json({ success: true, activities: result.rows });
-  } catch (error) {
-    logger.error('Activity fetch error:', error);
-    res.status(500).json({ success: false, error: 'Failed to load activity' });
-  }
-});
+    try {
+      const result = await pool.query(
+        "SELECT id, action, details, created_at FROM device_activity WHERE device_id = $1 ORDER BY created_at DESC LIMIT 200",
+        [deviceId],
+      );
+      res.json({ success: true, activities: result.rows });
+    } catch (error) {
+      logger.error("Activity fetch error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to load activity" });
+    }
+  },
+);
 
 // Get device network info (from location pings)
-app.get('/api/admin/devices/:deviceId/network', [
-  authenticateToken,
-  param('deviceId').isLength({ min: 5, max: 100 }).withMessage('Invalid device ID'),
-  handleValidationErrors
-], async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
-  const { deviceId } = req.params;
+app.get(
+  "/api/admin/devices/:deviceId/network",
+  [
+    authenticateToken,
+    param("deviceId")
+      .isLength({ min: 5, max: 100 })
+      .withMessage("Invalid device ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
+    }
+    const { deviceId } = req.params;
 
-  try {
-    const result = await pool.query(
-      `SELECT network_type, battery, accuracy, timestamp 
+    try {
+      const result = await pool.query(
+        `SELECT network_type, battery, accuracy, timestamp, ip_address 
        FROM location_pings WHERE device_id = $1 
        ORDER BY timestamp DESC LIMIT 50`,
-      [deviceId]
-    );
-    // Get network type distribution
-    const typeDist = await pool.query(
-      `SELECT network_type, COUNT(*)::int as count 
+        [deviceId],
+      );
+      // Get network type distribution
+      const typeDist = await pool.query(
+        `SELECT network_type, COUNT(*)::int as count 
        FROM location_pings WHERE device_id = $1 
        GROUP BY network_type ORDER BY count DESC`,
-      [deviceId]
-    );
-    res.json({ success: true, networkHistory: result.rows, networkTypes: typeDist.rows });
-  } catch (error) {
-    logger.error('Network info error:', error);
-    res.status(500).json({ success: false, error: 'Failed to load network info' });
-  }
-});
+        [deviceId],
+      );
+      res.json({
+        success: true,
+        networkHistory: result.rows,
+        networkTypes: typeDist.rows,
+      });
+    } catch (error) {
+      logger.error("Network info error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to load network info" });
+    }
+  },
+);
 
 // Analytics endpoint (admin)
-app.get('/api/admin/analytics', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
+app.get("/api/admin/analytics", authenticateToken, async (req, res) => {
+  if (req.user.role !== "admin") {
+    return res
+      .status(403)
+      .json({ success: false, error: "Admin access required" });
   }
   try {
-    const [devicesResult, pingsResult, alertsResult, timelineResult, membersResult] = await Promise.all([
-      pool.query(`SELECT status, COUNT(*)::int as count FROM devices GROUP BY status`),
+    const [
+      devicesResult,
+      pingsResult,
+      alertsResult,
+      timelineResult,
+      membersResult,
+    ] = await Promise.all([
+      pool.query(
+        `SELECT status, COUNT(*)::int as count FROM devices GROUP BY status`,
+      ),
       pool.query(`SELECT COUNT(*)::int as total FROM location_pings`),
-      pool.query(`SELECT COUNT(*)::int as total FROM location_pings WHERE alert IS NOT NULL AND timestamp::date = CURRENT_DATE`),
-      pool.query(`SELECT date_trunc('hour', timestamp) as time, COUNT(*)::int as pings FROM location_pings WHERE timestamp > NOW() - INTERVAL '24 hours' GROUP BY date_trunc('hour', timestamp) ORDER BY time`),
-      pool.query(`SELECT COUNT(*)::int as total FROM members WHERE payment_status = 'completed'`)
+      pool.query(
+        `SELECT COUNT(*)::int as total FROM location_pings WHERE alert IS NOT NULL AND timestamp::date = CURRENT_DATE`,
+      ),
+      pool.query(
+        `SELECT date_trunc('hour', timestamp) as time, COUNT(*)::int as pings FROM location_pings WHERE timestamp > NOW() - INTERVAL '24 hours' GROUP BY date_trunc('hour', timestamp) ORDER BY time`,
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int as total FROM members WHERE payment_status = 'completed'`,
+      ),
     ]);
 
     const statusCounts = {};
     let totalDevices = 0;
-    devicesResult.rows.forEach(r => { statusCounts[r.status] = r.count; totalDevices += r.count; });
+    devicesResult.rows.forEach((r) => {
+      statusCounts[r.status] = r.count;
+      totalDevices += r.count;
+    });
 
     res.json({
       success: true,
       analytics: {
         totalDevices,
-        activeDevices: statusCounts['active'] || 0,
-        dormantDevices: statusCounts['installed'] || 0,
-        reportedDevices: statusCounts['reported'] || 0,
+        activeDevices: statusCounts["active"] || 0,
+        dormantDevices: statusCounts["installed"] || 0,
+        reportedDevices: statusCounts["reported"] || 0,
         totalMembers: membersResult.rows[0].total,
         locationPings: pingsResult.rows[0].total,
         alertsToday: alertsResult.rows[0].total,
-        timeline: timelineResult.rows.map(r => ({ time: r.time, pings: r.pings }))
-      }
+        timeline: timelineResult.rows.map((r) => ({
+          time: r.time,
+          pings: r.pings,
+        })),
+      },
     });
   } catch (error) {
-    logger.error('Failed to fetch analytics:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch analytics' });
+    logger.error("Failed to fetch analytics:", error);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch analytics" });
   }
 });
 
 // Get all reports (admin)
-app.get('/api/admin/reports', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
+app.get("/api/admin/reports", authenticateToken, async (req, res) => {
+  if (req.user.role !== "admin") {
+    return res
+      .status(403)
+      .json({ success: false, error: "Admin access required" });
   }
   try {
     const result = await pool.query(
@@ -1876,63 +2648,75 @@ app.get('/api/admin/reports', authenticateToken, async (req, res) => {
          WHERE device_id = r.device_id AND alert IS NOT NULL
          ORDER BY timestamp DESC LIMIT 1
        ) lp ON true
-       ORDER BY r.created_at DESC`
+       ORDER BY r.created_at DESC`,
     );
     res.json({ success: true, reports: result.rows });
   } catch (error) {
-    logger.error('Failed to fetch reports:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch reports' });
+    logger.error("Failed to fetch reports:", error);
+    res.status(500).json({ success: false, error: "Failed to fetch reports" });
   }
 });
 
 // Verify a report (admin)
-app.post('/api/admin/reports/:reportId/verify', [
-  authenticateToken,
-  param('reportId').isInt({ min: 1 }).withMessage('Invalid report ID'),
-  handleValidationErrors
-], async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
-  const { reportId } = req.params;
-  try {
-    const result = await pool.query(
-      'UPDATE reports SET status = $1 WHERE id = $2 RETURNING device_id',
-      ['verified', reportId]
-    );
-    if (result.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Report not found' });
+app.post(
+  "/api/admin/reports/:reportId/verify",
+  [
+    authenticateToken,
+    param("reportId").isInt({ min: 1 }).withMessage("Invalid report ID"),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
     }
-    // Also update the device status to verified
-    await pool.query(
-      'UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
-      ['verified', result.rows[0].device_id]
-    );
-    logger.info(`Report ${reportId} verified by admin ${req.user.username}`);
-    res.json({ success: true });
-  } catch (error) {
-    logger.error('Failed to verify report:', error);
-    res.status(500).json({ success: false, error: 'Failed to verify report' });
-  }
-});
+    const { reportId } = req.params;
+    try {
+      const result = await pool.query(
+        "UPDATE reports SET status = $1 WHERE id = $2 RETURNING device_id",
+        ["verified", reportId],
+      );
+      if (result.rowCount === 0) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Report not found" });
+      }
+      // Also update the device status to verified
+      await pool.query(
+        "UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+        ["verified", result.rows[0].device_id],
+      );
+      logger.info(`Report ${reportId} verified by admin ${req.user.username}`);
+      res.json({ success: true });
+    } catch (error) {
+      logger.error("Failed to verify report:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to verify report" });
+    }
+  },
+);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ success: false, error: 'Internal server error' });
+  console.error("Unhandled error:", err);
+  res.status(500).json({ success: false, error: "Internal server error" });
 });
 
 // 404 handler - serve homepage for non-API routes, JSON for API routes
 app.use((req, res) => {
-  if (req.path.startsWith('/api/')) {
-    return res.status(404).json({ success: false, error: 'Endpoint not found' });
+  if (req.path.startsWith("/api/")) {
+    return res
+      .status(404)
+      .json({ success: false, error: "Endpoint not found" });
   }
-  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+  res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log('Real-time features enabled via Socket.IO');
+  console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
+  console.log("Real-time features enabled via Socket.IO");
 });

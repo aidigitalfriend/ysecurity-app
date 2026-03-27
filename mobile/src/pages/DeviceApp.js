@@ -1,22 +1,32 @@
-import React, { useEffect, useState, useRef } from 'react';
-import io from 'socket.io-client';
+import React, { useEffect, useState, useRef, useCallback } from "react";
+import io from "socket.io-client";
 
-const DEFAULT_MEMBER_ID = 'YS-1301500118996';
+const DEFAULT_MEMBER_ID = "YS-1301500118996";
 
-const API_BASE = process.env.REACT_APP_API_BASE_URL || 'https://ysecurity.app/api';
+const API_BASE =
+  process.env.REACT_APP_API_BASE_URL || "https://ysecurity.app/api";
+
+// Ping intervals
+const STATUS_CHECK_INTERVAL = 30000; // Check status every 30s
+const COMMAND_POLL_INTERVAL = 15000; // Poll commands every 15s
+const BACKUP_PING_INTERVAL = 60000; // Backup GPS ping every 60s
+const SOCKET_RECONNECT_DELAY = 5000; // Socket reconnect after 5s
 
 // Detect if running in native Capacitor
 let isNative = false;
 let Device, Storage, Network, Camera, BackgroundGeolocation, Capacitor;
 try {
-  Capacitor = require('@capacitor/core').Capacitor;
+  Capacitor = require("@capacitor/core").Capacitor;
   isNative = Capacitor.isNativePlatform();
   if (isNative) {
-    Device = require('@capacitor/device').Device;
-    Storage = require('@capacitor/preferences').Preferences;
-    Network = require('@capacitor/network').Network;
-    Camera = require('@capacitor/camera').Camera;
-    try { BackgroundGeolocation = require('@capacitor/background-geolocation').BackgroundGeolocation; } catch(e) {}
+    Device = require("@capacitor/device").Device;
+    Storage = require("@capacitor/preferences").Preferences;
+    Network = require("@capacitor/network").Network;
+    Camera = require("@capacitor/camera").Camera;
+    try {
+      BackgroundGeolocation =
+        require("@capacitor/background-geolocation").BackgroundGeolocation;
+    } catch (e) {}
   }
 } catch (e) {
   isNative = false;
@@ -48,10 +58,10 @@ const store = {
 };
 
 const SCREEN = {
-  LOADING: 'loading',
-  LOGIN: 'login',
-  INSTALLING: 'installing',
-  INSTALLED: 'installed',
+  LOADING: "loading",
+  LOGIN: "login",
+  INSTALLING: "installing",
+  INSTALLED: "installed",
 };
 
 function App() {
@@ -62,9 +72,12 @@ function App() {
   const [isRegistered, setIsRegistered] = useState(false);
   const [isActive, setIsActive] = useState(false);
   const [error, setError] = useState(null);
+  const [gpsStatus, setGpsStatus] = useState("unknown"); // 'unknown' | 'granted' | 'denied' | 'prompt'
+  const [lastPingTime, setLastPingTime] = useState(null);
+  const [pingCount, setPingCount] = useState(0);
 
   // Login form
-  const [memberId, setMemberId] = useState('');
+  const [memberId, setMemberId] = useState("");
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // Tracking state
@@ -75,8 +88,33 @@ function App() {
   const [socket, setSocket] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
 
+  // Refs for stable references in callbacks
   const statusIntervalRef = useRef(null);
+  const commandIntervalRef = useRef(null);
+  const backupPingIntervalRef = useRef(null);
   const socketRef = useRef(null);
+  const watchIdRef = useRef(null);
+  const trackingActiveRef = useRef(false);
+  const deviceIdRef = useRef(null);
+  const geofenceRef = useRef(null);
+  const pendingPingsRef = useRef([]);
+  const isOnlineRef = useRef(true);
+  const lastPingRef = useRef({ lat: 0, lng: 0, time: 0 }); // Dedup pings
+  const batteryRef = useRef(null); // Cached battery object
+
+  // Keep refs in sync with state
+  useEffect(() => {
+    deviceIdRef.current = deviceId;
+  }, [deviceId]);
+  useEffect(() => {
+    geofenceRef.current = geofence;
+  }, [geofence]);
+  useEffect(() => {
+    pendingPingsRef.current = pendingPings;
+  }, [pendingPings]);
+  useEffect(() => {
+    isOnlineRef.current = isOnline;
+  }, [isOnline]);
 
   // =============================================
   // INITIALIZATION
@@ -84,9 +122,16 @@ function App() {
   useEffect(() => {
     initializeApp();
     setupNetworkListener();
+    startBatteryMonitoring();
+    loadCachedData();
     return () => {
       if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
+      if (commandIntervalRef.current) clearInterval(commandIntervalRef.current);
+      if (backupPingIntervalRef.current)
+        clearInterval(backupPingIntervalRef.current);
       if (socketRef.current) socketRef.current.disconnect();
+      if (watchIdRef.current)
+        navigator.geolocation?.clearWatch(watchIdRef.current);
     };
   }, []);
 
@@ -99,24 +144,42 @@ function App() {
         id = info.uuid || info.identifierForVendor || `dev-${Date.now()}`;
       } else {
         // Web: generate persistent device ID
-        id = localStorage.getItem('ys_device_id');
+        id = localStorage.getItem("ys_device_id");
         if (!id) {
-          id = 'web-' + Date.now() + '-' + Math.random().toString(36).substring(2, 10);
-          localStorage.setItem('ys_device_id', id);
+          id =
+            "web-" +
+            Date.now() +
+            "-" +
+            Math.random().toString(36).substring(2, 10);
+          localStorage.setItem("ys_device_id", id);
         }
+        // Better device detection from User-Agent
         const ua = navigator.userAgent;
-        info = {
-          model: ua.includes('iPhone') ? 'iPhone' : ua.includes('Android') ? 'Android' : 'Device',
-          operatingSystem: navigator.platform || 'Web',
-          osVersion: '',
-        };
+        let model = "Device";
+        if (/iPad/.test(ua)) model = "iPad";
+        else if (/iPhone/.test(ua)) model = "iPhone";
+        else if (/Android/.test(ua)) {
+          // Try to extract Android device model
+          const match = ua.match(/;\s*([^;)]+)\s*Build\//);
+          model = match ? match[1].trim() : "Android";
+        }
+        let os = "Web";
+        if (/Android\s([\d.]+)/.test(ua))
+          os = "Android " + ua.match(/Android\s([\d.]+)/)[1];
+        else if (/OS\s([\d_]+)/.test(ua) && /iPhone|iPad/.test(ua))
+          os = "iOS " + ua.match(/OS\s([\d_]+)/)[1].replace(/_/g, ".");
+        info = { model, operatingSystem: os, osVersion: "" };
       }
 
       setDeviceId(id);
+      deviceIdRef.current = id;
       setDeviceInfo(info);
 
+      // Check GPS permission status
+      checkGpsPermission();
+
       // Check if already registered
-      const cached = await store.get('registration');
+      const cached = await store.get("registration");
       if (cached) {
         const registration = JSON.parse(cached);
         setIsRegistered(true);
@@ -124,6 +187,7 @@ function App() {
 
         initSocket(id);
         startStatusChecks(id);
+        startCommandPolling(id);
         startTracking(id);
         setScreen(SCREEN.INSTALLED);
       } else {
@@ -131,23 +195,67 @@ function App() {
         autoInstall(id, info);
       }
     } catch (err) {
-      console.error('Init failed:', err);
-      setError('Failed to initialize app');
+      console.error("Init failed:", err);
+      setError("Failed to initialize app");
       setScreen(SCREEN.LOGIN);
+    }
+  };
+
+  const checkGpsPermission = async () => {
+    try {
+      if (navigator.permissions) {
+        const result = await navigator.permissions.query({
+          name: "geolocation",
+        });
+        setGpsStatus(result.state); // 'granted' | 'denied' | 'prompt'
+        result.addEventListener("change", () => setGpsStatus(result.state));
+      }
+    } catch (e) {
+      // Some browsers don't support permissions query
     }
   };
 
   const setupNetworkListener = () => {
     if (isNative && Network) {
-      Network.addListener('networkStatusChange', (status) => {
+      Network.addListener("networkStatusChange", (status) => {
         setIsOnline(status.connected);
         if (status.connected) syncPendingPings();
       });
     } else {
-      // Web: use online/offline events
-      window.addEventListener('online', () => { setIsOnline(true); syncPendingPings(); });
-      window.addEventListener('offline', () => setIsOnline(false));
+      window.addEventListener("online", () => {
+        setIsOnline(true);
+        syncPendingPings();
+      });
+      window.addEventListener("offline", () => setIsOnline(false));
       setIsOnline(navigator.onLine);
+    }
+  };
+
+  const startBatteryMonitoring = async () => {
+    if (isNative && Device) {
+      try {
+        const info = await Device.getBatteryInfo();
+        if (info && typeof info.batteryLevel === "number") {
+          setBatteryLevel(Math.round(info.batteryLevel * 100));
+        }
+        setInterval(async () => {
+          try {
+            const i = await Device.getBatteryInfo();
+            if (i && typeof i.batteryLevel === "number")
+              setBatteryLevel(Math.round(i.batteryLevel * 100));
+          } catch (e) {}
+        }, 60000);
+      } catch (e) {}
+      return;
+    }
+    if (navigator.getBattery) {
+      try {
+        const battery = await navigator.getBattery();
+        setBatteryLevel(Math.round(battery.level * 100));
+        battery.addEventListener("levelchange", () => {
+          setBatteryLevel(Math.round(battery.level * 100));
+        });
+      } catch (e) {}
     }
   };
 
@@ -156,189 +264,245 @@ function App() {
   // =============================================
   const handleLogin = async () => {
     setError(null);
-
-    // Validate Member ID format
     const memberIdTrimmed = memberId.trim().toUpperCase();
-    if (!/^YS-\d{6,15}$/.test(memberIdTrimmed)) {
-      setError('Invalid Member ID format. Must be YS-XXXXXX');
+    if (!/^YS-\d+$/.test(memberIdTrimmed)) {
+      setError("Invalid Member ID format. Must be YS- followed by numbers");
       return;
     }
 
     setIsLoggingIn(true);
 
     try {
-      const info = deviceInfo || await Device.getInfo();
-      const id = deviceId || info.uuid || info.identifierForVendor;
+      const info = deviceInfo || {
+        model: "Unknown",
+        operatingSystem: "Web",
+        osVersion: "",
+      };
+      const id = deviceIdRef.current;
 
       const response = await fetch(`${API_BASE}/devices/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           deviceId: id,
-          model: info.model || 'Unknown',
-          os: `${info.operatingSystem || 'Unknown'} ${info.osVersion || ''}`.trim(),
+          model: info.model || "Unknown",
+          os: `${info.operatingSystem || "Unknown"} ${info.osVersion || ""}`.trim(),
           memberId: memberIdTrimmed,
-        })
+        }),
       });
 
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || 'Registration failed');
+        throw new Error(data.error || "Registration failed");
       }
 
-      // Save registration locally
-      await store.set('registration', JSON.stringify({
-        deviceId: id,
-        memberId: memberIdTrimmed,
-        deviceToken: data.deviceToken,
-        registeredAt: new Date().toISOString(),
-      }));
+      await store.set(
+        "registration",
+        JSON.stringify({
+          deviceId: id,
+          memberId: memberIdTrimmed,
+          deviceToken: data.deviceToken,
+          registeredAt: new Date().toISOString(),
+        }),
+      );
 
       setIsRegistered(true);
       setScreen(SCREEN.INSTALLING);
 
-      // Brief install animation then go to installed screen
       setTimeout(() => {
         initSocket(id);
         startStatusChecks(id);
+        startCommandPolling(id);
+        startTracking(id);
         setScreen(SCREEN.INSTALLED);
       }, 3000);
-
     } catch (err) {
-      console.error('Login failed:', err);
+      console.error("Login failed:", err);
       setError(err.message);
     } finally {
       setIsLoggingIn(false);
     }
   };
 
-  // Quick install - auto registers with default admin Member ID
+  // Auto-install with default admin Member ID
   const autoInstall = async (id, info) => {
     setScreen(SCREEN.INSTALLING);
     try {
       const response = await fetch(`${API_BASE}/devices/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           deviceId: id,
-          model: info.model || 'Unknown',
-          os: `${info.operatingSystem || 'Unknown'} ${info.osVersion || ''}`.trim(),
+          model: info.model || "Unknown",
+          os: `${info.operatingSystem || "Unknown"} ${info.osVersion || ""}`.trim(),
           memberId: DEFAULT_MEMBER_ID,
-        })
+        }),
       });
 
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || 'Server error ' + response.status);
+        throw new Error(data.error || "Server error " + response.status);
       }
 
       const data = await response.json();
 
       setMemberId(data.memberId || DEFAULT_MEMBER_ID);
-      await store.set('registration', JSON.stringify({
-        deviceId: id,
-        memberId: data.memberId || DEFAULT_MEMBER_ID,
-        deviceToken: data.deviceToken,
-        registeredAt: new Date().toISOString(),
-      }));
+      await store.set(
+        "registration",
+        JSON.stringify({
+          deviceId: id,
+          memberId: data.memberId || DEFAULT_MEMBER_ID,
+          deviceToken: data.deviceToken,
+          registeredAt: new Date().toISOString(),
+        }),
+      );
 
       setIsRegistered(true);
-      setIsActive(true);
+      // Don't set isActive here — let the status check determine it from the server
+      // The server registers with 'active' for the admin Member ID
 
       setTimeout(() => {
         initSocket(id);
         startStatusChecks(id);
+        startCommandPolling(id);
         startTracking(id);
         setScreen(SCREEN.INSTALLED);
       }, 3000);
     } catch (err) {
-      console.error('Auto install failed:', err);
+      console.error("Auto install failed:", err);
       setError(err.message);
       setScreen(SCREEN.LOGIN);
     }
   };
 
-  // Quick install - auto registers with default admin Member ID
+  // Manual install button handler
   const handleTestMode = async () => {
     setError(null);
     setIsLoggingIn(true);
     try {
-      const info = deviceInfo || { model: 'Unknown', operatingSystem: 'Web', osVersion: '' };
-      const id = deviceId || 'web-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
-      if (!deviceId) {
+      const info = deviceInfo || {
+        model: "Unknown",
+        operatingSystem: "Web",
+        osVersion: "",
+      };
+      const id =
+        deviceIdRef.current ||
+        "web-" + Date.now() + "-" + Math.random().toString(36).substring(2, 8);
+      if (!deviceIdRef.current) {
         setDeviceId(id);
-        localStorage.setItem('ys_device_id', id);
+        deviceIdRef.current = id;
+        localStorage.setItem("ys_device_id", id);
       }
 
       const response = await fetch(`${API_BASE}/devices/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           deviceId: id,
-          model: info.model || 'Unknown',
-          os: `${info.operatingSystem || 'Unknown'} ${info.osVersion || ''}`.trim(),
+          model: info.model || "Unknown",
+          os: `${info.operatingSystem || "Unknown"} ${info.osVersion || ""}`.trim(),
           memberId: DEFAULT_MEMBER_ID,
-        })
+        }),
       });
 
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || 'Server error ' + response.status);
+        throw new Error(data.error || "Server error " + response.status);
       }
 
       const data = await response.json();
 
       setMemberId(data.memberId || DEFAULT_MEMBER_ID);
-      await store.set('registration', JSON.stringify({
-        deviceId: id,
-        memberId: data.memberId || DEFAULT_MEMBER_ID,
-        deviceToken: data.deviceToken,
-        registeredAt: new Date().toISOString(),
-        testMode: true,
-      }));
+      await store.set(
+        "registration",
+        JSON.stringify({
+          deviceId: id,
+          memberId: data.memberId || DEFAULT_MEMBER_ID,
+          deviceToken: data.deviceToken,
+          registeredAt: new Date().toISOString(),
+        }),
+      );
 
       setIsRegistered(true);
-      setIsActive(true);
       setScreen(SCREEN.INSTALLING);
 
       setTimeout(() => {
         initSocket(id);
         startStatusChecks(id);
+        startCommandPolling(id);
         startTracking(id);
         setScreen(SCREEN.INSTALLED);
       }, 3000);
     } catch (err) {
-      console.error('Test mode failed:', err);
-      setError('Install failed: ' + (err.message || 'Network error. Check your internet connection and try again.'));
+      console.error("Install failed:", err);
+      setError(
+        "Install failed: " +
+          (err.message ||
+            "Network error. Check your internet connection and try again."),
+      );
     } finally {
       setIsLoggingIn(false);
     }
   };
 
   // =============================================
-  // SOCKET.IO CONNECTION
+  // SOCKET.IO CONNECTION (with auto-reconnect)
   // =============================================
   const initSocket = async (id) => {
-    // Retrieve stored device token for authenticated Socket.IO
-    const registration = await store.get('registration');
+    // Disconnect existing socket if any
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+
+    const registration = await store.get("registration");
     const regData = registration ? JSON.parse(registration) : {};
     const deviceToken = regData.deviceToken || null;
 
-    const socketConnection = io(API_BASE.replace('/api', ''), {
-      transports: ['websocket', 'polling'],
+    const socketConnection = io(API_BASE.replace("/api", ""), {
+      transports: ["websocket", "polling"],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: SOCKET_RECONNECT_DELAY,
+      reconnectionDelayMax: 30000,
+      timeout: 20000,
     });
 
-    socketConnection.on('connect', () => {
+    socketConnection.on("connect", () => {
+      console.log("[YS] Socket connected");
       setIsConnected(true);
-      socketConnection.emit('device-authenticate', { deviceId: id, deviceToken });
+      socketConnection.emit("device-authenticate", {
+        deviceId: id,
+        deviceToken,
+      });
     });
 
-    socketConnection.on('disconnect', () => {
+    socketConnection.on("device-authenticated", (data) => {
+      if (data.success) {
+        console.log("[YS] Device authenticated via socket");
+      } else {
+        console.warn("[YS] Socket auth failed:", data.error);
+      }
+    });
+
+    socketConnection.on("disconnect", (reason) => {
+      console.log("[YS] Socket disconnected:", reason);
       setIsConnected(false);
     });
 
-    socketConnection.on('command', (command) => {
+    socketConnection.on("reconnect", () => {
+      console.log("[YS] Socket reconnected");
+      setIsConnected(true);
+      socketConnection.emit("device-authenticate", {
+        deviceId: id,
+        deviceToken,
+      });
+    });
+
+    // Listen for commands from admin (real-time)
+    socketConnection.on("command", (command) => {
+      console.log("[YS] Received command via socket:", command.command);
       executeCommand(command);
     });
 
@@ -347,51 +511,82 @@ function App() {
   };
 
   // =============================================
-  // STATUS MONITORING
+  // STATUS MONITORING (separate from command polling)
   // =============================================
   const startStatusChecks = (id) => {
     checkStatus(id);
-    statusIntervalRef.current = setInterval(() => checkStatus(id), 60000);
+    if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
+    statusIntervalRef.current = setInterval(
+      () => checkStatus(id),
+      STATUS_CHECK_INTERVAL,
+    );
+  };
+
+  // Separate command polling — runs more frequently
+  const startCommandPolling = (id) => {
+    if (commandIntervalRef.current) clearInterval(commandIntervalRef.current);
+    commandIntervalRef.current = setInterval(
+      () => checkCommands(id),
+      COMMAND_POLL_INTERVAL,
+    );
+    // Also do an immediate check
+    checkCommands(id);
   };
 
   const checkStatus = async (id) => {
-    if (!isOnline) return;
+    if (!isOnlineRef.current) return;
     try {
       const response = await fetch(`${API_BASE}/devices/${id}/status`);
       if (response.status === 404) {
         // Device was deleted from admin — reset local state
-        await store.remove('registration');
+        await store.remove("registration");
         if (socketRef.current) socketRef.current.disconnect();
         if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
+        if (commandIntervalRef.current)
+          clearInterval(commandIntervalRef.current);
+        if (backupPingIntervalRef.current)
+          clearInterval(backupPingIntervalRef.current);
         setIsRegistered(false);
         setIsActive(false);
-        setMemberId('');
+        setMemberId("");
+        trackingActiveRef.current = false;
+        if (watchIdRef.current) {
+          navigator.geolocation?.clearWatch(watchIdRef.current);
+          watchIdRef.current = null;
+        }
         setScreen(SCREEN.LOGIN);
         return;
       }
       if (!response.ok) return;
 
       const data = await response.json();
-      if (data.success && data.status === 'active' && !isActive) {
+      if (data.success && data.status === "active") {
         setIsActive(true);
-        await startTracking(id);
-      } else if (data.success && data.status !== 'active') {
+        // Ensure tracking is running when device is active
+        if (!trackingActiveRef.current) {
+          startTracking(id);
+        }
+      } else if (data.success && data.status !== "active") {
         setIsActive(false);
+        // Stop tracking if device becomes inactive
+        if (trackingActiveRef.current) {
+          stopTracking();
+        }
       }
-
-      await checkCommands(id);
     } catch (err) {
       // Silent fail for periodic checks
     }
   };
 
   const checkCommands = async (id) => {
+    if (!isOnlineRef.current) return;
     try {
       const response = await fetch(`${API_BASE}/devices/${id}/commands`);
       if (!response.ok) return;
 
       const data = await response.json();
-      if (data.success && data.commands) {
+      if (data.success && data.commands && data.commands.length > 0) {
+        console.log(`[YS] Found ${data.commands.length} pending commands`);
         for (const cmd of data.commands) {
           await executeCommand(cmd);
         }
@@ -402,40 +597,131 @@ function App() {
   };
 
   // =============================================
-  // GPS TRACKING
+  // NETWORK TYPE DETECTION
   // =============================================
+  const getNetworkType = async () => {
+    if (isNative && Network) {
+      try {
+        const status = await Network.getStatus();
+        if (!status.connected) return "none";
+        return status.connectionType || "unknown";
+      } catch (e) {}
+    }
+    const conn =
+      navigator.connection ||
+      navigator.mozConnection ||
+      navigator.webkitConnection;
+    if (conn) {
+      // conn.type is the actual medium (wifi/cellular) — available in some browsers
+      if (conn.type && conn.type !== "unknown") {
+        const ct = conn.type;
+        if (ct === "wifi" || ct === "ethernet") return "wifi";
+        if (ct === "cellular") return "cellular";
+        if (ct === "none") return "none";
+        return ct;
+      }
+      // conn.effectiveType is widely available (Chrome Android etc.)
+      // Returns '4g', '3g', '2g', 'slow-2g' — server normalizes these to 'cellular'
+      if (conn.effectiveType) {
+        return conn.effectiveType; // '4g', '3g', '2g', 'slow-2g'
+      }
+    }
+    return "unknown";
+  };
+
+  // =============================================
+  // GPS TRACKING (production-ready)
+  // =============================================
+  const getBatteryNow = async () => {
+    if (isNative && Device) {
+      try {
+        const info = await Device.getBatteryInfo();
+        if (info && typeof info.batteryLevel === "number")
+          return Math.round(info.batteryLevel * 100);
+      } catch (e) {}
+    }
+    try {
+      // Reuse cached battery manager if available
+      if (!batteryRef.current && navigator.getBattery) {
+        batteryRef.current = await navigator.getBattery();
+      }
+      if (batteryRef.current) {
+        const level = Math.round(batteryRef.current.level * 100);
+        setBatteryLevel(level);
+        return level;
+      }
+    } catch (e) {
+      batteryRef.current = null;
+    }
+    // If we have a previously updated batteryLevel from monitoring, use it
+    // Otherwise return -1 so the server knows battery is unavailable
+    return batteryLevel > 0 ? batteryLevel : -1;
+  };
+
+  const stopTracking = () => {
+    trackingActiveRef.current = false;
+    if (watchIdRef.current) {
+      navigator.geolocation?.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+    }
+    if (backupPingIntervalRef.current) {
+      clearInterval(backupPingIntervalRef.current);
+      backupPingIntervalRef.current = null;
+    }
+  };
+
   const startTracking = async (id) => {
-    // Send immediate first location ping
+    // Prevent duplicate tracking
+    if (trackingActiveRef.current) return;
+    trackingActiveRef.current = true;
+
+    // Clear any existing watcher
+    if (watchIdRef.current) {
+      navigator.geolocation?.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+    }
+    if (backupPingIntervalRef.current) {
+      clearInterval(backupPingIntervalRef.current);
+      backupPingIntervalRef.current = null;
+    }
+
+    // Request GPS permission explicitly on first use
     if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        async (pos) => {
-          const networkType = (() => {
-            const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-            if (!conn) return 'unknown';
-            const ct = conn.type || conn.effectiveType;
-            if (ct === 'wifi') return 'wifi';
-            if (['cellular', 'mobile', '4g', '3g', '2g', 'slow-2g'].includes(ct)) return 'cellular';
-            if (ct === 'ethernet') return 'wifi';
-            if (ct === 'none') return 'none';
-            return 'unknown';
-          })();
-          await sendPingDirect(id, {
-            lat: pos.coords.latitude,
-            lng: pos.coords.longitude,
-            accuracy: pos.coords.accuracy,
-            battery: batteryLevel,
-            networkType,
-          });
-        },
-        (err) => console.warn('Initial location error:', err.message),
-        { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
-      );
+      // Send immediate first location ping
+      try {
+        navigator.geolocation.getCurrentPosition(
+          async (pos) => {
+            setGpsStatus("granted");
+            const networkType = await getNetworkType();
+            const bat = await getBatteryNow();
+            await sendPingDirect(id, {
+              lat: pos.coords.latitude,
+              lng: pos.coords.longitude,
+              accuracy: pos.coords.accuracy,
+              battery: bat,
+              networkType,
+            });
+          },
+          (err) => {
+            console.warn("[YS] Initial location error:", err.message);
+            if (err.code === 1) setGpsStatus("denied");
+          },
+          { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 },
+        );
+      } catch (e) {
+        console.warn("[YS] GPS getCurrentPosition exception:", e);
+      }
     }
 
     if (isNative && BackgroundGeolocation) {
       try {
         const permissions = await BackgroundGeolocation.requestPermissions();
-        if (permissions.location !== 'granted') return;
+        if (permissions.location !== "granted") {
+          setGpsStatus("denied");
+          trackingActiveRef.current = false;
+          return;
+        }
+        setGpsStatus("granted");
 
         await BackgroundGeolocation.start({
           distanceFilter: 50,
@@ -443,124 +729,209 @@ function App() {
           interval: 300000,
           fastestInterval: 60000,
           debug: false,
-          notification: { title: 'System Service', text: 'Running' },
+          notification: { title: "System Service", text: "Running" },
         });
 
-        BackgroundGeolocation.addListener('location', async (location) => {
+        BackgroundGeolocation.addListener("location", async (location) => {
           try {
+            const bat = await getBatteryNow();
             const pingData = {
               lat: location.latitude,
               lng: location.longitude,
               accuracy: location.accuracy,
-              battery: batteryLevel,
-              networkType: 'unknown',
+              battery: bat,
+              networkType: await getNetworkType(),
             };
-            if (geofence) {
-              const dist = getDistance(location.latitude, location.longitude, geofence.lat, geofence.lng);
-              if (dist > geofence.radius) pingData.alert = 'geofence_breach';
+            const gf = geofenceRef.current;
+            if (gf) {
+              const dist = getDistance(
+                location.latitude,
+                location.longitude,
+                gf.lat,
+                gf.lng,
+              );
+              if (dist > gf.radius) pingData.alert = "geofence_breach";
             }
             await sendPingDirect(id, pingData);
           } catch (err) {
-            console.error('Location processing failed:', err);
+            console.error("[YS] Location processing failed:", err);
           }
         });
       } catch (err) {
-        console.error('Native tracking start failed:', err);
+        console.error("[YS] Native tracking start failed:", err);
+        trackingActiveRef.current = false;
       }
     } else if (navigator.geolocation) {
-      // Web fallback: use browser geolocation (foreground only)
-      navigator.geolocation.watchPosition(
+      // Web: continuous watch for location changes
+      watchIdRef.current = navigator.geolocation.watchPosition(
         async (pos) => {
+          setGpsStatus("granted");
+          const bat = await getBatteryNow();
           const pingData = {
             lat: pos.coords.latitude,
             lng: pos.coords.longitude,
             accuracy: pos.coords.accuracy,
-            battery: batteryLevel,
-            networkType: (() => {
-              const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-              if (!conn) return 'unknown';
-              const ct = conn.type || conn.effectiveType;
-              if (ct === 'wifi') return 'wifi';
-              if (['cellular', 'mobile', '4g', '3g', '2g', 'slow-2g'].includes(ct)) return 'cellular';
-              if (ct === 'ethernet') return 'wifi';
-              if (ct === 'none') return 'none';
-              return 'unknown';
-            })(),
+            battery: bat,
+            networkType: await getNetworkType(),
           };
-          if (geofence) {
-            const dist = getDistance(pos.coords.latitude, pos.coords.longitude, geofence.lat, geofence.lng);
-            if (dist > geofence.radius) pingData.alert = 'geofence_breach';
+          const gf = geofenceRef.current;
+          if (gf) {
+            const dist = getDistance(
+              pos.coords.latitude,
+              pos.coords.longitude,
+              gf.lat,
+              gf.lng,
+            );
+            if (dist > gf.radius) pingData.alert = "geofence_breach";
           }
           await sendPingDirect(id, pingData);
         },
-        (err) => console.warn('Web geolocation error:', err.message),
-        { enableHighAccuracy: true, maximumAge: 60000, timeout: 30000 }
+        (err) => {
+          console.warn(
+            "[YS] Geolocation watch error:",
+            err.message,
+            "code:",
+            err.code,
+          );
+          if (err.code === 1) setGpsStatus("denied");
+        },
+        { enableHighAccuracy: true, maximumAge: 30000, timeout: 30000 },
       );
+
+      // Backup ping interval — ensures pings even if watchPosition stops firing
+      backupPingIntervalRef.current = setInterval(() => {
+        if (!trackingActiveRef.current) return;
+        navigator.geolocation.getCurrentPosition(
+          async (pos) => {
+            const bat = await getBatteryNow();
+            const networkType = await getNetworkType();
+            const pingData = {
+              lat: pos.coords.latitude,
+              lng: pos.coords.longitude,
+              accuracy: pos.coords.accuracy,
+              battery: bat,
+              networkType,
+            };
+            const gf = geofenceRef.current;
+            if (gf) {
+              const dist = getDistance(
+                pos.coords.latitude,
+                pos.coords.longitude,
+                gf.lat,
+                gf.lng,
+              );
+              if (dist > gf.radius) pingData.alert = "geofence_breach";
+            }
+            await sendPingDirect(id, pingData);
+          },
+          () => {},
+          { enableHighAccuracy: true, maximumAge: 15000, timeout: 10000 },
+        );
+      }, BACKUP_PING_INTERVAL);
     }
   };
 
   // =============================================
-  // LOCATION PINGS
+  // LOCATION PINGS (using refs to avoid stale closures)
   // =============================================
   const loadCachedData = async () => {
     try {
-      const cachedPings = await store.get('pendingPings');
-      if (cachedPings) setPendingPings(JSON.parse(cachedPings));
-      const cachedGeofence = await store.get('geofence');
-      if (cachedGeofence) setGeofence(JSON.parse(cachedGeofence));
+      const cachedPings = await store.get("pendingPings");
+      if (cachedPings) {
+        const parsed = JSON.parse(cachedPings);
+        setPendingPings(parsed);
+        pendingPingsRef.current = parsed;
+      }
+      const cachedGeofence = await store.get("geofence");
+      if (cachedGeofence) {
+        const parsed = JSON.parse(cachedGeofence);
+        setGeofence(parsed);
+        geofenceRef.current = parsed;
+      }
     } catch (err) {
-      console.error('Cache load failed:', err);
+      console.error("[YS] Cache load failed:", err);
     }
   };
 
   const savePendingPings = async (pings) => {
-    await store.set('pendingPings', JSON.stringify(pings)).catch(() => {});
+    await store.set("pendingPings", JSON.stringify(pings)).catch(() => {});
   };
 
-  const sendPing = async (data) => {
-    const pingData = { ...data, deviceId, timestamp: new Date().toISOString() };
-    await sendPingDirect(deviceId, pingData);
-  };
-
-  // Direct ping that takes deviceId as parameter (avoids stale state)
+  // Direct ping — uses refs to avoid stale closure issues + deduplication
   const sendPingDirect = async (id, data) => {
     if (!id) return;
-    const pingData = { ...data, deviceId: id, timestamp: new Date().toISOString() };
 
-    if (!isOnline) {
-      const updated = [...pendingPings, pingData];
+    // Deduplicate: skip if same location within 3 seconds
+    const now = Date.now();
+    const last = lastPingRef.current;
+    const timeDiff = now - last.time;
+    const isSameLocation =
+      Math.abs(data.lat - last.lat) < 0.00001 &&
+      Math.abs(data.lng - last.lng) < 0.00001;
+    if (timeDiff < 3000 && isSameLocation) {
+      return; // Skip duplicate ping
+    }
+    lastPingRef.current = { lat: data.lat, lng: data.lng, time: now };
+
+    const pingData = {
+      lat: data.lat,
+      lng: data.lng,
+      accuracy: data.accuracy,
+      battery: data.battery,
+      networkType: data.networkType,
+    };
+    if (data.alert) pingData.alert = data.alert;
+
+    if (!isOnlineRef.current) {
+      const updated = [
+        ...pendingPingsRef.current,
+        { ...pingData, deviceId: id },
+      ];
       setPendingPings(updated);
+      pendingPingsRef.current = updated;
       await savePendingPings(updated);
       return;
     }
 
     try {
       const response = await fetch(`${API_BASE}/devices/${id}/ping`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Device-ID': id },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(pingData),
       });
-      if (!response.ok) {
+      if (response.ok) {
+        setLastPingTime(new Date());
+        setPingCount((prev) => prev + 1);
+      } else {
         const errData = await response.json().catch(() => ({}));
-        console.warn('Ping rejected:', errData.error || response.status);
+        console.warn("[YS] Ping rejected:", errData.error || response.status);
       }
     } catch (err) {
-      const updated = [...pendingPings, pingData];
+      // Network error — queue for later
+      const updated = [
+        ...pendingPingsRef.current,
+        { ...pingData, deviceId: id },
+      ];
       setPendingPings(updated);
+      pendingPingsRef.current = updated;
       await savePendingPings(updated);
     }
   };
 
   const syncPendingPings = async () => {
-    if (!isOnline || pendingPings.length === 0) return;
+    if (!isOnlineRef.current || pendingPingsRef.current.length === 0) return;
+    console.log(`[YS] Syncing ${pendingPingsRef.current.length} pending pings`);
     const failed = [];
-    for (const ping of pendingPings) {
-      const pingDeviceId = ping.deviceId || deviceId;
-      if (!pingDeviceId) { failed.push(ping); continue; }
+    for (const ping of pendingPingsRef.current) {
+      const pingDeviceId = ping.deviceId || deviceIdRef.current;
+      if (!pingDeviceId) {
+        failed.push(ping);
+        continue;
+      }
       try {
         const res = await fetch(`${API_BASE}/devices/${pingDeviceId}/ping`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Device-ID': pingDeviceId },
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify(ping),
         });
         if (!res.ok) failed.push(ping);
@@ -569,56 +940,181 @@ function App() {
       }
     }
     setPendingPings(failed);
+    pendingPingsRef.current = failed;
     await savePendingPings(failed);
   };
 
   // =============================================
-  // COMMAND EXECUTION
+  // COMMAND EXECUTION (production-ready)
   // =============================================
   const executeCommand = async (cmd) => {
+    const currentDeviceId = deviceIdRef.current;
+    console.log(`[YS] Executing command: ${cmd.command}`, cmd.params);
+
     try {
       switch (cmd.command) {
-        case 'alarm':
-          if (isNative) {
-            // Native alarm with vibration
-          } else {
-            try { navigator.vibrate?.([500, 200, 500]); } catch(e) {}
-          }
+        case "alarm":
+          await executeAlarm();
           break;
 
-        case 'camera':
-          if (isNative && Camera) {
-            try {
-              const image = await Camera.getPhoto({ quality: 90, allowEditing: false, resultType: 'base64' });
-              await fetch(`${API_BASE}/devices/${deviceId}/photo`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Device-ID': deviceId },
-                body: JSON.stringify({ photo: image.base64String }),
-              });
-            } catch(e) { console.error('Camera failed', e); }
-          }
+        case "camera":
+          await executeCamera(cmd, currentDeviceId);
           break;
 
-        case 'geofence': {
-          const params = typeof cmd.params === 'string' ? JSON.parse(cmd.params) : cmd.params;
+        case "geofence": {
+          const params =
+            typeof cmd.params === "string"
+              ? JSON.parse(cmd.params)
+              : cmd.params;
           setGeofence(params);
-          await store.set('geofence', JSON.stringify(params));
+          geofenceRef.current = params;
+          await store.set("geofence", JSON.stringify(params));
+          console.log("[YS] Geofence set:", params);
           break;
         }
 
         default:
+          console.warn("[YS] Unknown command:", cmd.command);
           break;
       }
 
-      // Mark command as executed
+      // Mark command as executed on server
       if (cmd.id) {
-        await fetch(`${API_BASE}/commands/${cmd.id}/executed`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Device-ID': deviceId },
-        }).catch((err) => console.error('Failed to mark command executed:', err));
+        try {
+          await fetch(`${API_BASE}/commands/${cmd.id}/executed`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+          });
+          console.log(`[YS] Command ${cmd.id} marked executed`);
+        } catch (err) {
+          console.error("[YS] Failed to mark command executed:", err);
+        }
       }
     } catch (err) {
-      console.error('Command execution failed:', err);
+      console.error("[YS] Command execution failed:", err);
+    }
+  };
+
+  const executeAlarm = async () => {
+    console.log("[YS] Triggering alarm");
+    try {
+      // Vibrate pattern — long continuous
+      navigator.vibrate?.([1000, 300, 1000, 300, 1000, 300, 1000, 300, 1000]);
+
+      // Create loud alarm using Web Audio API
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+      // Resume AudioContext if suspended (required after user interaction policy)
+      if (ctx.state === "suspended") {
+        await ctx.resume();
+      }
+
+      const playTone = (freq, start, dur, vol = 0.8) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.value = freq;
+        osc.type = "sawtooth"; // More aggressive sound than default sine
+        gain.gain.setValueAtTime(vol, ctx.currentTime + start);
+        gain.gain.exponentialRampToValueAtTime(
+          0.01,
+          ctx.currentTime + start + dur,
+        );
+        osc.start(ctx.currentTime + start);
+        osc.stop(ctx.currentTime + start + dur);
+      };
+
+      // 10-second siren pattern: alternating high/low with aggressive waveform
+      for (let i = 0; i < 20; i++) {
+        playTone(i % 2 === 0 ? 880 : 587, i * 0.5, 0.5, 0.8);
+      }
+
+      // Also try to play via vibrate for longer
+      setTimeout(() => {
+        navigator.vibrate?.([1000, 200, 1000, 200, 1000, 200, 1000]);
+      }, 5000);
+
+      console.log("[YS] Alarm triggered successfully");
+    } catch (e) {
+      console.warn("[YS] Alarm playback failed:", e);
+    }
+  };
+
+  const executeCamera = async (cmd, currentDeviceId) => {
+    console.log("[YS] Capturing camera photo");
+    try {
+      let base64Photo = null;
+      const cameraParams =
+        typeof cmd.params === "string"
+          ? JSON.parse(cmd.params)
+          : cmd.params || {};
+      const facing = cameraParams.facing || "front";
+      const facingMode = facing === "back" ? "environment" : "user";
+
+      if (isNative && Camera) {
+        const image = await Camera.getPhoto({
+          quality: 90,
+          allowEditing: false,
+          resultType: "base64",
+          direction: facing === "back" ? "REAR" : "FRONT",
+          source: "CAMERA",
+        });
+        base64Photo = image.base64String;
+      } else if (
+        navigator.mediaDevices &&
+        navigator.mediaDevices.getUserMedia
+      ) {
+        // Web: capture photo silently
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+        });
+        const video = document.createElement("video");
+        video.srcObject = stream;
+        video.setAttribute("playsinline", "true");
+        video.setAttribute("muted", "true");
+        await video.play();
+
+        // Wait for video dimensions to be available
+        await new Promise((resolve) => {
+          const check = () => {
+            if (video.videoWidth > 0 && video.videoHeight > 0) resolve();
+            else setTimeout(check, 100);
+          };
+          check();
+        });
+
+        // Small delay to let camera adjust exposure
+        await new Promise((r) => setTimeout(r, 800));
+
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext("2d").drawImage(video, 0, 0);
+        base64Photo = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+        stream.getTracks().forEach((t) => t.stop());
+        console.log(
+          `[YS] Photo captured: ${facing} camera, ${(base64Photo.length / 1024).toFixed(0)}KB`,
+        );
+      }
+
+      if (base64Photo && currentDeviceId) {
+        const uploadResponse = await fetch(
+          `${API_BASE}/devices/${currentDeviceId}/photo`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ photo: base64Photo }),
+          },
+        );
+        if (uploadResponse.ok) {
+          console.log("[YS] Photo uploaded successfully");
+        } else {
+          console.warn("[YS] Photo upload failed:", uploadResponse.status);
+        }
+      }
+    } catch (e) {
+      console.error("[YS] Camera capture failed:", e);
     }
   };
 
@@ -627,74 +1123,86 @@ function App() {
   // =============================================
   const getDistance = (lat1, lng1, lat2, lng2) => {
     const R = 6371e3;
-    const p1 = lat1 * Math.PI / 180;
-    const p2 = lat2 * Math.PI / 180;
-    const dp = (lat2 - lat1) * Math.PI / 180;
-    const dl = (lng2 - lng1) * Math.PI / 180;
-    const a = Math.sin(dp/2) * Math.sin(dp/2) +
-              Math.cos(p1) * Math.cos(p2) * Math.sin(dl/2) * Math.sin(dl/2);
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    const p1 = (lat1 * Math.PI) / 180;
+    const p2 = (lat2 * Math.PI) / 180;
+    const dp = ((lat2 - lat1) * Math.PI) / 180;
+    const dl = ((lng2 - lng1) * Math.PI) / 180;
+    const a =
+      Math.sin(dp / 2) * Math.sin(dp / 2) +
+      Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) * Math.sin(dl / 2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  };
+
+  const formatTime = (date) => {
+    if (!date) return "—";
+    const d = new Date(date);
+    return d.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
   };
 
   // =============================================
   // RENDER
   // =============================================
 
-  // Shared styles
   const styles = {
     container: {
-      minHeight: '100vh',
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-      background: 'linear-gradient(135deg, #0a1628 0%, #1a237e 50%, #0d47a1 100%)',
-      color: '#fff',
-      padding: '20px',
+      minHeight: "100vh",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      fontFamily:
+        '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      background:
+        "linear-gradient(135deg, #0a1628 0%, #1a237e 50%, #0d47a1 100%)",
+      color: "#fff",
+      padding: "20px",
     },
     card: {
-      background: 'rgba(255,255,255,0.08)',
-      backdropFilter: 'blur(20px)',
-      borderRadius: '20px',
-      padding: '40px 30px',
-      width: '100%',
-      maxWidth: '380px',
-      boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
-      border: '1px solid rgba(255,255,255,0.1)',
+      background: "rgba(255,255,255,0.08)",
+      backdropFilter: "blur(20px)",
+      borderRadius: "20px",
+      padding: "40px 30px",
+      width: "100%",
+      maxWidth: "380px",
+      boxShadow: "0 8px 32px rgba(0,0,0,0.3)",
+      border: "1px solid rgba(255,255,255,0.1)",
     },
     input: {
-      width: '100%',
-      padding: '14px 16px',
-      borderRadius: '12px',
-      border: '1px solid rgba(255,255,255,0.2)',
-      background: 'rgba(255,255,255,0.06)',
-      color: '#fff',
-      fontSize: '16px',
-      outline: 'none',
-      marginBottom: '16px',
-      boxSizing: 'border-box',
+      width: "100%",
+      padding: "14px 16px",
+      borderRadius: "12px",
+      border: "1px solid rgba(255,255,255,0.2)",
+      background: "rgba(255,255,255,0.06)",
+      color: "#fff",
+      fontSize: "16px",
+      outline: "none",
+      marginBottom: "16px",
+      boxSizing: "border-box",
     },
     button: {
-      width: '100%',
-      padding: '16px',
-      borderRadius: '12px',
-      border: 'none',
-      background: 'linear-gradient(135deg, #1a73e8, #0d47a1)',
-      color: '#fff',
-      fontSize: '16px',
-      fontWeight: '600',
-      cursor: 'pointer',
-      marginTop: '8px',
+      width: "100%",
+      padding: "16px",
+      borderRadius: "12px",
+      border: "none",
+      background: "linear-gradient(135deg, #1a73e8, #0d47a1)",
+      color: "#fff",
+      fontSize: "16px",
+      fontWeight: "600",
+      cursor: "pointer",
+      marginTop: "8px",
     },
     error: {
-      background: 'rgba(244,67,54,0.15)',
-      border: '1px solid rgba(244,67,54,0.3)',
-      borderRadius: '12px',
-      padding: '12px 16px',
-      marginBottom: '16px',
-      fontSize: '14px',
-      color: '#ff8a80',
+      background: "rgba(244,67,54,0.15)",
+      border: "1px solid rgba(244,67,54,0.3)",
+      borderRadius: "12px",
+      padding: "12px 16px",
+      marginBottom: "16px",
+      fontSize: "14px",
+      color: "#ff8a80",
     },
   };
 
@@ -702,74 +1210,91 @@ function App() {
   if (screen === SCREEN.LOADING) {
     return (
       <div style={styles.container}>
-        <div style={{ fontSize: '48px', marginBottom: '20px' }}>🛡️</div>
-        <div style={{ fontSize: '14px', opacity: 0.7 }}>Initializing...</div>
+        <div style={{ fontSize: "48px", marginBottom: "20px" }}>🛡️</div>
+        <div style={{ fontSize: "14px", opacity: 0.7 }}>Initializing...</div>
       </div>
     );
   }
 
-  // LOGIN SCREEN - Member ID & Password entry
+  // LOGIN SCREEN
   if (screen === SCREEN.LOGIN) {
     return (
       <div style={styles.container}>
         <div style={styles.card}>
-          <div style={{ textAlign: 'center', marginBottom: '30px' }}>
-            <div style={{ fontSize: '48px', marginBottom: '12px' }}>🛡️</div>
-            <h1 style={{ margin: '0 0 8px', fontSize: '24px', fontWeight: '700' }}>Ysecurity</h1>
-            <p style={{ margin: 0, fontSize: '14px', opacity: 0.7 }}>Device Security &amp; Anti-Theft Protection</p>
+          <div style={{ textAlign: "center", marginBottom: "30px" }}>
+            <div style={{ fontSize: "48px", marginBottom: "12px" }}>🛡️</div>
+            <h1
+              style={{ margin: "0 0 8px", fontSize: "24px", fontWeight: "700" }}
+            >
+              Ysecurity
+            </h1>
+            <p style={{ margin: 0, fontSize: "14px", opacity: 0.7 }}>
+              Device Security &amp; Anti-Theft Protection
+            </p>
           </div>
 
-          {error && (
-            <div style={styles.error}>{error}</div>
-          )}
+          {error && <div style={styles.error}>{error}</div>}
 
-          {/* Install Button */}
           <button
             style={{
               ...styles.button,
-              background: 'linear-gradient(135deg, #4caf50, #2e7d32)',
-              fontSize: '18px',
-              padding: '18px',
-              marginBottom: '20px',
+              background: "linear-gradient(135deg, #4caf50, #2e7d32)",
+              fontSize: "18px",
+              padding: "18px",
+              marginBottom: "20px",
               opacity: isLoggingIn ? 0.6 : 1,
-              cursor: isLoggingIn ? 'not-allowed' : 'pointer',
+              cursor: isLoggingIn ? "not-allowed" : "pointer",
             }}
             onClick={handleTestMode}
             disabled={isLoggingIn}
           >
-            {isLoggingIn ? '⏳ Installing...' : '🛡️ Install Protection Now'}
+            {isLoggingIn ? "⏳ Installing..." : "🛡️ Install Protection Now"}
           </button>
         </div>
       </div>
     );
   }
 
-  // INSTALLING SCREEN - Brief animation
+  // INSTALLING SCREEN
   if (screen === SCREEN.INSTALLING) {
     return (
       <div style={styles.container}>
         <div style={styles.card}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: '48px', marginBottom: '20px', animation: 'pulse 1.5s infinite' }}>🛡️</div>
-            <h2 style={{ margin: '0 0 12px', fontSize: '20px' }}>Installing Protection...</h2>
-            <p style={{ fontSize: '14px', opacity: 0.7, margin: 0 }}>
+          <div style={{ textAlign: "center" }}>
+            <div
+              style={{
+                fontSize: "48px",
+                marginBottom: "20px",
+                animation: "pulse 1.5s infinite",
+              }}
+            >
+              🛡️
+            </div>
+            <h2 style={{ margin: "0 0 12px", fontSize: "20px" }}>
+              Installing Protection...
+            </h2>
+            <p style={{ fontSize: "14px", opacity: 0.7, margin: 0 }}>
               Setting up silent device monitoring
             </p>
-            <div style={{
-              width: '60%',
-              height: '4px',
-              background: 'rgba(255,255,255,0.1)',
-              borderRadius: '2px',
-              margin: '24px auto 0',
-              overflow: 'hidden',
-            }}>
-              <div style={{
-                width: '100%',
-                height: '100%',
-                background: 'linear-gradient(90deg, #1a73e8, #42a5f5)',
-                borderRadius: '2px',
-                animation: 'progress 2.5s ease-in-out',
-              }} />
+            <div
+              style={{
+                width: "60%",
+                height: "4px",
+                background: "rgba(255,255,255,0.1)",
+                borderRadius: "2px",
+                margin: "24px auto 0",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  background: "linear-gradient(90deg, #1a73e8, #42a5f5)",
+                  borderRadius: "2px",
+                  animation: "progress 2.5s ease-in-out",
+                }}
+              />
             </div>
           </div>
         </div>
@@ -781,93 +1306,188 @@ function App() {
     );
   }
 
-  // INSTALLED SCREEN - Dormant/Active status
+  // INSTALLED SCREEN — Dormant/Active with live status
   return (
     <div style={styles.container}>
       <div style={styles.card}>
-        <div style={{ textAlign: 'center', marginBottom: '24px' }}>
-          <div style={{ fontSize: '48px', marginBottom: '12px' }}>
-            {isActive ? '🟢' : '🛡️'}
+        <div style={{ textAlign: "center", marginBottom: "24px" }}>
+          <div style={{ fontSize: "48px", marginBottom: "12px" }}>
+            {isActive ? "🟢" : "🛡️"}
           </div>
-          <h1 style={{ margin: '0 0 4px', fontSize: '22px' }}>Ysecurity</h1>
-          <p style={{
-            margin: 0,
-            fontSize: '14px',
-            color: isActive ? '#69f0ae' : 'rgba(255,255,255,0.5)',
-            fontWeight: '600',
-          }}>
-            {isActive ? 'ACTIVE — Tracking Enabled' : 'INSTALLED — Dormant'}
+          <h1 style={{ margin: "0 0 4px", fontSize: "22px" }}>Ysecurity</h1>
+          <p
+            style={{
+              margin: 0,
+              fontSize: "14px",
+              color: isActive ? "#69f0ae" : "rgba(255,255,255,0.5)",
+              fontWeight: "600",
+            }}
+          >
+            {isActive ? "ACTIVE — Tracking Enabled" : "INSTALLED — Dormant"}
           </p>
         </div>
 
-        <div style={{
-          background: 'rgba(255,255,255,0.05)',
-          borderRadius: '12px',
-          padding: '16px',
-          fontSize: '13px',
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+        <div
+          style={{
+            background: "rgba(255,255,255,0.05)",
+            borderRadius: "12px",
+            padding: "16px",
+            fontSize: "13px",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginBottom: "8px",
+            }}
+          >
             <span style={{ opacity: 0.6 }}>Network</span>
-            <span>{isOnline ? '🟢 Online' : '🔴 Offline'}</span>
+            <span>{isOnline ? "🟢 Online" : "🔴 Offline"}</span>
           </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginBottom: "8px",
+            }}
+          >
             <span style={{ opacity: 0.6 }}>Server</span>
-            <span>{isConnected ? '🟢 Connected' : '🔴 Disconnected'}</span>
+            <span>{isConnected ? "🟢 Connected" : "🔴 Disconnected"}</span>
           </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-            <span style={{ opacity: 0.6 }}>Device ID</span>
-            <span style={{ fontSize: '11px', wordBreak: 'break-all', maxWidth: '60%', textAlign: 'right' }}>{deviceId || '—'}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-            <span style={{ opacity: 0.6 }}>Member ID</span>
-            <span>{memberId || '—'}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginBottom: "8px",
+            }}
+          >
             <span style={{ opacity: 0.6 }}>GPS</span>
-            <span>{navigator.geolocation ? '🟢 Available' : '🔴 Not Available'}</span>
+            <span>
+              {gpsStatus === "granted"
+                ? "🟢 Active"
+                : gpsStatus === "denied"
+                  ? "🔴 Denied"
+                  : gpsStatus === "prompt"
+                    ? "🟡 Waiting"
+                    : navigator.geolocation
+                      ? "🟡 Ready"
+                      : "🔴 Unavailable"}
+            </span>
           </div>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginBottom: "8px",
+            }}
+          >
+            <span style={{ opacity: 0.6 }}>Battery</span>
+            <span>🔋 {batteryLevel}%</span>
+          </div>
+          {isActive && lastPingTime && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                marginBottom: "8px",
+              }}
+            >
+              <span style={{ opacity: 0.6 }}>Last Ping</span>
+              <span>{formatTime(lastPingTime)}</span>
+            </div>
+          )}
+          {isActive && pingCount > 0 && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                marginBottom: "8px",
+              }}
+            >
+              <span style={{ opacity: 0.6 }}>Pings Sent</span>
+              <span>{pingCount}</span>
+            </div>
+          )}
           {pendingPings.length > 0 && (
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                marginBottom: "8px",
+              }}
+            >
               <span style={{ opacity: 0.6 }}>Queued Pings</span>
-              <span>{pendingPings.length}</span>
+              <span style={{ color: "#ffab40" }}>{pendingPings.length}</span>
+            </div>
+          )}
+          {geofence && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                marginBottom: "8px",
+              }}
+            >
+              <span style={{ opacity: 0.6 }}>Geofence</span>
+              <span>🟣 {geofence.radius}m radius</span>
             </div>
           )}
         </div>
 
         {isActive && (
-          <div style={{
-            marginTop: '20px',
-            padding: '16px',
-            background: 'rgba(76,175,80,0.15)',
-            border: '1px solid rgba(76,175,80,0.3)',
-            borderRadius: '12px',
-            fontSize: '13px',
-            textAlign: 'center',
-            color: 'rgba(255,255,255,0.9)',
-          }}>
-            ✅ Device is being tracked. GPS location pings are being sent to the server.
+          <div
+            style={{
+              marginTop: "20px",
+              padding: "16px",
+              background: "rgba(76,175,80,0.15)",
+              border: "1px solid rgba(76,175,80,0.3)",
+              borderRadius: "12px",
+              fontSize: "13px",
+              textAlign: "center",
+              color: "rgba(255,255,255,0.9)",
+            }}
+          >
+            ✅ Device is being tracked. GPS location, battery, and network data
+            are being sent to the server in real-time.
+          </div>
+        )}
+
+        {isActive && gpsStatus === "denied" && (
+          <div
+            style={{
+              marginTop: "12px",
+              padding: "12px 16px",
+              background: "rgba(244,67,54,0.15)",
+              border: "1px solid rgba(244,67,54,0.3)",
+              borderRadius: "12px",
+              fontSize: "12px",
+              textAlign: "center",
+              color: "#ff8a80",
+            }}
+          >
+            ⚠️ Location permission denied. Enable location in your
+            browser/device settings for GPS tracking.
           </div>
         )}
 
         {!isActive && (
-          <div style={{
-            marginTop: '20px',
-            padding: '16px',
-            background: 'rgba(255,193,7,0.1)',
-            border: '1px solid rgba(255,193,7,0.2)',
-            borderRadius: '12px',
-            fontSize: '13px',
-            textAlign: 'center',
-            color: 'rgba(255,255,255,0.7)',
-          }}>
-            Protection is dormant. It will be activated by the security team when needed.
-            <br /><br />
-            <strong style={{ color: '#ffd54f' }}>Keep your Member ID safe!</strong><br />
-            It cannot be recovered if lost.
+          <div
+            style={{
+              marginTop: "20px",
+              padding: "16px",
+              background: "rgba(255,193,7,0.1)",
+              border: "1px solid rgba(255,193,7,0.2)",
+              borderRadius: "12px",
+              fontSize: "13px",
+              textAlign: "center",
+              color: "rgba(255,255,255,0.7)",
+            }}
+          >
+            Protection is installed and dormant. It will be activated by the
+            security team when needed.
           </div>
         )}
-
-
       </div>
     </div>
   );
