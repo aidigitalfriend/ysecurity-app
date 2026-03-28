@@ -2,7 +2,6 @@
   "appId": "com.ysecurity.app",
   "appName": "Ysecurity",
   "webDir": "build",
-  "bundledWebRuntime": false,
   "plugins": {
     "PushNotifications": {
       "presentationOptions": ["badge", "sound", "alert"]

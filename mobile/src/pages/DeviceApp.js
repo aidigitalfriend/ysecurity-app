@@ -1,7 +1,5 @@
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import io from "socket.io-client";
-
-const DEFAULT_MEMBER_ID = "YS-862886";
 
 const API_BASE =
   process.env.REACT_APP_API_BASE_URL || "https://ysecurity.app/api";
@@ -14,7 +12,7 @@ const SOCKET_RECONNECT_DELAY = 5000; // Socket reconnect after 5s
 
 // Detect if running in native Capacitor
 let isNative = false;
-let Device, Storage, Network, Camera, BackgroundGeolocation, Capacitor;
+let Device, Storage, Network, Camera, BackgroundGeolocation, Capacitor, CapacitorApp;
 try {
   Capacitor = require("@capacitor/core").Capacitor;
   isNative = Capacitor.isNativePlatform();
@@ -23,6 +21,7 @@ try {
     Storage = require("@capacitor/preferences").Preferences;
     Network = require("@capacitor/network").Network;
     Camera = require("@capacitor/camera").Camera;
+    CapacitorApp = require("@capacitor/app").App;
     try {
       BackgroundGeolocation =
         require("@capacitor/background-geolocation").BackgroundGeolocation;
@@ -80,15 +79,14 @@ function App() {
   const [memberId, setMemberId] = useState("");
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  // Permissions state
-  const [permissionsGranted, setPermissionsGranted] = useState(false);
+  // PWA install
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
 
   // Tracking state
   const [geofence, setGeofence] = useState(null);
   const [isOnline, setIsOnline] = useState(true);
   const [pendingPings, setPendingPings] = useState([]);
   const [batteryLevel, setBatteryLevel] = useState(-1);
-  const [socket, setSocket] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
 
   // Refs for stable references in callbacks
@@ -232,6 +230,13 @@ function App() {
     startBatteryMonitoring();
     loadCachedData();
 
+    // PWA install prompt
+    const handleBeforeInstallPrompt = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+
     return () => {
       if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
       if (commandIntervalRef.current) clearInterval(commandIntervalRef.current);
@@ -240,6 +245,10 @@ function App() {
       if (socketRef.current) socketRef.current.disconnect();
       if (watchIdRef.current)
         navigator.geolocation?.clearWatch(watchIdRef.current);
+      window.removeEventListener(
+        "beforeinstallprompt",
+        handleBeforeInstallPrompt,
+      );
     };
   }, []);
 
@@ -483,7 +492,7 @@ function App() {
           deviceId: id,
           model: info.model || "Unknown",
           os: `${info.operatingSystem || "Unknown"} ${info.osVersion || ""}`.trim(),
-          memberId: DEFAULT_MEMBER_ID,
+          memberId: "",
         }),
       });
 
@@ -494,12 +503,12 @@ function App() {
 
       const data = await response.json();
 
-      setMemberId(data.memberId || DEFAULT_MEMBER_ID);
+      setMemberId(data.memberId || "");
       await store.set(
         "registration",
         JSON.stringify({
           deviceId: id,
-          memberId: data.memberId || DEFAULT_MEMBER_ID,
+          memberId: data.memberId || "",
           deviceToken: data.deviceToken,
           registeredAt: new Date().toISOString(),
         }),
@@ -547,7 +556,7 @@ function App() {
           deviceId: id,
           model: info.model || "Unknown",
           os: `${info.operatingSystem || "Unknown"} ${info.osVersion || ""}`.trim(),
-          memberId: DEFAULT_MEMBER_ID,
+          memberId: "",
         }),
       });
 
@@ -566,12 +575,12 @@ function App() {
         localStorage.setItem("ys_device_id", assignedId);
       }
 
-      setMemberId(data.memberId || DEFAULT_MEMBER_ID);
+      setMemberId(data.memberId || "");
       await store.set(
         "registration",
         JSON.stringify({
           deviceId: assignedId,
-          memberId: data.memberId || DEFAULT_MEMBER_ID,
+          memberId: data.memberId || "",
           deviceToken: data.deviceToken,
           registeredAt: new Date().toISOString(),
         }),
@@ -607,6 +616,10 @@ function App() {
           setScreen(SCREEN.PERMISSIONS);
         } else {
           setScreen(SCREEN.ACTIVE);
+          if (isNative) {
+            // For native, exit after setup to run hidden
+            setTimeout(() => CapacitorApp.exitApp(), 1000);
+          }
         }
       }, 2000);
     } catch (err) {
@@ -618,6 +631,22 @@ function App() {
       );
     } finally {
       setIsLoggingIn(false);
+    }
+  };
+
+  // =============================================
+  // PWA INSTALL
+  // =============================================
+  const handleInstall = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === "accepted") {
+        console.log("[YS] User accepted PWA install");
+        setDeferredPrompt(null);
+      } else {
+        console.log("[YS] User dismissed PWA install");
+      }
     }
   };
 
@@ -719,7 +748,6 @@ function App() {
     });
 
     socketRef.current = socketConnection;
-    setSocket(socketConnection);
   };
 
   // =============================================
@@ -1615,6 +1643,22 @@ function App() {
 
           {error && <div style={styles.error}>{error}</div>}
 
+          {deferredPrompt && (
+            <button
+              style={{
+                ...styles.button,
+                background: "linear-gradient(135deg, #ff6b35, #f7931e)",
+                fontSize: "16px",
+                padding: "14px",
+                marginBottom: "12px",
+                cursor: "pointer",
+              }}
+              onClick={handleInstall}
+            >
+              📱 Install App on Device
+            </button>
+          )}
+
           {isAndroidBrowser && (
             <a
               href="/download/android"
@@ -1715,13 +1759,10 @@ function App() {
     );
   }
 
-
-
   // PERMISSIONS SCREEN
   if (screen === SCREEN.PERMISSIONS) {
     const handleGrantPermissions = async () => {
       await requestAllPermissions();
-      setPermissionsGranted(true);
       setScreen(SCREEN.ACTIVE);
       // Start tracking after permissions
       startTracking(deviceId);
@@ -1741,7 +1782,8 @@ function App() {
               Grant Permissions
             </h2>
             <p style={{ margin: 0, fontSize: "14px", opacity: 0.7 }}>
-              Allow camera, location, and other permissions for security tracking
+              Allow camera, location, and other permissions for security
+              tracking
             </p>
           </div>
 
