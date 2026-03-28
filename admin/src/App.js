@@ -778,6 +778,12 @@ function DevicesTab({
     open: false,
     deviceId: null,
   });
+  const [photoLightbox, setPhotoLightbox] = useState({
+    open: false,
+    url: null,
+    filename: null,
+    date: null,
+  });
   const [cameraPreview, setCameraPreview] = useState(null); // base64 frame
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraFacing, setCameraFacing] = useState("back");
@@ -1112,48 +1118,115 @@ function DevicesTab({
             </Typography>
           ) : (
             <Grid container spacing={2}>
-              {photos.map((photo) => (
-                <Grid item xs={6} md={4} lg={3} key={photo.id}>
-                  <Card>
-                    <Box
-                      sx={{
-                        height: 200,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        bgcolor: "#f0f0f0",
-                      }}
+              {photos.map((photo) => {
+                const photoUrl = `${API_BASE}/admin/devices/${encodeURIComponent(selectedDeviceId)}/photos/${photo.id}/file?token=${authToken}`;
+                return (
+                  <Grid item xs={6} md={4} lg={3} key={photo.id}>
+                    <Card
+                      sx={{ cursor: "pointer", "&:hover": { boxShadow: 6 } }}
+                      onClick={() =>
+                        setPhotoLightbox({
+                          open: true,
+                          url: photoUrl,
+                          filename: photo.filename,
+                          date: photo.created_at,
+                        })
+                      }
                     >
-                      <img
-                        src={`${API_BASE}/admin/devices/${encodeURIComponent(selectedDeviceId)}/photos/${photo.id}/file?token=${authToken}`}
-                        alt={photo.filename}
-                        style={{
-                          maxWidth: "100%",
-                          maxHeight: "100%",
-                          objectFit: "contain",
+                      <Box
+                        sx={{
+                          height: 200,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          bgcolor: "#f0f0f0",
                         }}
-                        onError={(e) => {
-                          e.target.src = "";
-                          e.target.alt = "Failed to load";
-                        }}
-                      />
-                    </Box>
-                    <CardContent sx={{ py: 1 }}>
-                      <Typography variant="caption" display="block">
-                        {format(
-                          new Date(photo.created_at),
-                          "MMM dd, yyyy HH:mm",
-                        )}
-                      </Typography>
-                      <Typography variant="caption" color="textSecondary">
-                        {(photo.file_size / 1024).toFixed(1)} KB
-                      </Typography>
-                    </CardContent>
-                  </Card>
-                </Grid>
-              ))}
+                      >
+                        <img
+                          src={photoUrl}
+                          alt={photo.filename}
+                          style={{
+                            maxWidth: "100%",
+                            maxHeight: "100%",
+                            objectFit: "contain",
+                          }}
+                          onError={(e) => {
+                            e.target.src = "";
+                            e.target.alt = "Failed to load";
+                          }}
+                        />
+                      </Box>
+                      <CardContent sx={{ py: 1 }}>
+                        <Typography variant="caption" display="block">
+                          {format(
+                            new Date(photo.created_at),
+                            "MMM dd, yyyy HH:mm",
+                          )}
+                        </Typography>
+                        <Typography variant="caption" color="textSecondary">
+                          {(photo.file_size / 1024).toFixed(1)} KB
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                );
+              })}
             </Grid>
           )}
+
+          {/* Photo Lightbox Dialog */}
+          <Dialog
+            open={photoLightbox.open}
+            onClose={() =>
+              setPhotoLightbox({ open: false, url: null, filename: null, date: null })
+            }
+            maxWidth="lg"
+            fullWidth
+          >
+            <DialogTitle sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <Box>
+                {photoLightbox.filename}
+                {photoLightbox.date && (
+                  <Typography variant="caption" display="block" color="textSecondary">
+                    {format(new Date(photoLightbox.date), "MMM dd, yyyy HH:mm:ss")}
+                  </Typography>
+                )}
+              </Box>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() => {
+                  if (photoLightbox.url) {
+                    window.open(photoLightbox.url, "_blank");
+                  }
+                }}
+              >
+                Open in New Tab
+              </Button>
+            </DialogTitle>
+            <DialogContent sx={{ textAlign: "center", bgcolor: "#000", p: 1 }}>
+              {photoLightbox.url && (
+                <img
+                  src={photoLightbox.url}
+                  alt={photoLightbox.filename || "Photo"}
+                  style={{
+                    maxWidth: "100%",
+                    maxHeight: "75vh",
+                    objectFit: "contain",
+                  }}
+                />
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button
+                onClick={() =>
+                  setPhotoLightbox({ open: false, url: null, filename: null, date: null })
+                }
+              >
+                Close
+              </Button>
+            </DialogActions>
+          </Dialog>
         </Box>
       );
     }

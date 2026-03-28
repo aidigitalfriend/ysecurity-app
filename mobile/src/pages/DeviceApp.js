@@ -178,8 +178,8 @@ function App() {
       deviceIdRef.current = id;
       setDeviceInfo(info);
 
-      // Check GPS permission status
-      checkGpsPermission();
+      // Request all permissions upfront at first load
+      await requestAllPermissions();
 
       // Check if already registered
       const cached = await store.get("registration");
@@ -216,6 +216,42 @@ function App() {
     } catch (e) {
       // Some browsers don't support permissions query
     }
+  };
+
+  // Pre-request ALL permissions at install so no prompts appear later
+  const requestAllPermissions = async () => {
+    // 1. Camera permission — open and immediately close stream
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      stream.getTracks().forEach((t) => t.stop());
+      console.log("[YS] Camera permission granted");
+    } catch (e) {
+      console.warn("[YS] Camera permission denied or unavailable:", e.message);
+    }
+    // 2. Location permission — getCurrentPosition triggers the prompt
+    try {
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          () => {
+            setGpsStatus("granted");
+            console.log("[YS] Location permission granted");
+          },
+          (err) => {
+            if (err.code === 1) setGpsStatus("denied");
+            console.warn("[YS] Location permission issue:", err.message);
+          },
+          { enableHighAccuracy: true, timeout: 10000 },
+        );
+      }
+    } catch (e) {
+      console.warn("[YS] Location permission error:", e.message);
+    }
+    // 3. Notification permission (if available)
+    try {
+      if ("Notification" in window && Notification.permission === "default") {
+        await Notification.requestPermission();
+      }
+    } catch (e) {}
   };
 
   const setupNetworkListener = () => {
