@@ -12,7 +12,13 @@ const SOCKET_RECONNECT_DELAY = 5000; // Socket reconnect after 5s
 
 // Detect if running in native Capacitor
 let isNative = false;
-let Device, Storage, Network, Camera, BackgroundGeolocation, Capacitor, CapacitorApp;
+let Device,
+  Storage,
+  Network,
+  Camera,
+  BackgroundGeolocation,
+  Capacitor,
+  CapacitorApp;
 try {
   Capacitor = require("@capacitor/core").Capacitor;
   isNative = Capacitor.isNativePlatform();

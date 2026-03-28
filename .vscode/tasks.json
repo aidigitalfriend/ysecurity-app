@@ -46,7 +46,7 @@
     {
       "label": "Deploy to EC2",
       "type": "shell",
-      "command": "ssh -i talktrue.pem ubuntu@ec2-3-1-66-68.ap-southeast-1.compute.amazonaws.com 'cd /var/www/ysecurity && git pull && cd mobile && npm install && npm run build && cd ../backend && npm install && pm2 restart ysecurity'",
+      "command": "ssh -i talktrue.pem ubuntu@ec2-3-1-66-68.ap-southeast-1.compute.amazonaws.com 'cd /var/www/ysecurity && git reset --hard HEAD && git pull && cd mobile && npm install && npm run build && cd ../backend && npm install && pm2 restart ysecurity'",
       "group": "build",
       "problemMatcher": []
     }

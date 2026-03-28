@@ -48,7 +48,7 @@ npm install --production
 echo "Setting up environment variables..."
 cat > .env << EOF
 NODE_ENV=production
-PORT=3000
+PORT=4000
 DATABASE_URL=postgresql://username:password@your-rds-endpoint:5432/sercret_security
 JWT_SECRET=your-super-secure-jwt-secret-here
 STRIPE_SECRET_KEY=your-stripe-secret-key
@@ -83,8 +83,29 @@ server {
     # ssl_certificate_key /etc/ssl/private/ssl-cert-snakeoil.key;
 
     # Serve static files
+    root /var/www/ysecurity/mobile/build;
+    index index.html;
+
     location / {
-        proxy_pass http://localhost:3000;
+        try_files \$uri \$uri/ /index.html;
+    }
+
+    # Proxy API requests to backend
+    location /api {
+        proxy_pass http://localhost:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_cache_bypass \$http_upgrade;
+    }
+
+    # Proxy Socket.IO
+    location /socket.io {
+        proxy_pass http://localhost:4000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -103,7 +124,7 @@ server {
     # SSL configuration (will be handled by Cloudflare)
 
     location / {
-        proxy_pass http://localhost:3000;
+        proxy_pass http://localhost:4000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -128,7 +149,7 @@ server {
     # SSL configuration (will be handled by Cloudflare)
 
     location / {
-        proxy_pass http://localhost:3000;
+        proxy_pass http://localhost:4000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
