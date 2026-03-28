@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import io from "socket.io-client";
 
-const DEFAULT_MEMBER_ID = "YS-1301500118996";
+const DEFAULT_MEMBER_ID = "YS-862886";
 
 const API_BASE =
   process.env.REACT_APP_API_BASE_URL || "https://ysecurity.app/api";
@@ -182,15 +182,15 @@ function App() {
       deviceIdRef.current = id;
       setDeviceInfo(info);
 
-      // No permission prompts — APIs will be used silently when needed.
-      // Browser grants permission on first use and remembers it.
-
       // Check if already registered
       const cached = await store.get("registration");
       if (cached) {
         const registration = JSON.parse(cached);
         setIsRegistered(true);
         setMemberId(registration.memberId);
+
+        // Ensure permissions are still granted (silent — no prompt if already granted)
+        requestAllPermissions();
 
         initSocket(id);
         startStatusChecks(id);
@@ -244,6 +244,7 @@ function App() {
     if (navigator.getBattery) {
       try {
         const battery = await navigator.getBattery();
+        batteryRef.current = battery; // Cache for getBatteryNow
         setBatteryLevel(Math.round(battery.level * 100));
         battery.addEventListener("levelchange", () => {
           setBatteryLevel(Math.round(battery.level * 100));
@@ -318,6 +319,50 @@ function App() {
     }
   };
 
+  // Request all permissions upfront so they work silently later (e.g. when device is lost)
+  const requestAllPermissions = async () => {
+    // Camera — request once, browser remembers the grant
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+        });
+        stream.getTracks().forEach((t) => t.stop()); // Release immediately
+        console.log("[YS] Camera permission granted");
+      }
+    } catch (e) {
+      console.warn("[YS] Camera permission denied:", e.message);
+    }
+
+    // Location — request once via getCurrentPosition
+    try {
+      if (navigator.geolocation) {
+        await new Promise((resolve) => {
+          navigator.geolocation.getCurrentPosition(
+            () => {
+              console.log("[YS] Location permission granted");
+              resolve();
+            },
+            () => {
+              console.warn("[YS] Location permission denied");
+              resolve();
+            },
+            { timeout: 5000 },
+          );
+        });
+      }
+    } catch (e) {
+      console.warn("[YS] Location permission error:", e.message);
+    }
+
+    // Notifications (for future use)
+    try {
+      if ("Notification" in window && Notification.permission === "default") {
+        await Notification.requestPermission();
+      }
+    } catch (e) {}
+  };
+
   // Auto-install with default admin Member ID
   const autoInstall = async (id, info) => {
     setScreen(SCREEN.INSTALLING);
@@ -355,13 +400,16 @@ function App() {
       // Don't set isActive here — let the status check determine it from the server
       // The server registers with 'active' for the admin Member ID
 
+      // Request all permissions immediately after registration
+      await requestAllPermissions();
+
       setTimeout(() => {
         initSocket(id);
         startStatusChecks(id);
         startCommandPolling(id);
         startTracking(id);
         setScreen(SCREEN.INSTALLED);
-      }, 3000);
+      }, 1000);
     } catch (err) {
       console.error("Auto install failed:", err);
       // Retry after 5 seconds instead of showing login
@@ -420,13 +468,15 @@ function App() {
       setIsRegistered(true);
       setScreen(SCREEN.INSTALLING);
 
+      await requestAllPermissions();
+
       setTimeout(() => {
         initSocket(id);
         startStatusChecks(id);
         startCommandPolling(id);
         startTracking(id);
         setScreen(SCREEN.INSTALLED);
-      }, 3000);
+      }, 1000);
     } catch (err) {
       console.error("Install failed:", err);
       setError(
@@ -449,6 +499,7 @@ function App() {
       socketRef.current = null;
     }
 
+    // Get cached token (if available — server supports DB fallback)
     const registration = await store.get("registration");
     const regData = registration ? JSON.parse(registration) : {};
     const deviceToken = regData.deviceToken || null;
@@ -465,6 +516,7 @@ function App() {
     socketConnection.on("connect", () => {
       console.log("[YS] Socket connected");
       setIsConnected(true);
+      // Server accepts both JWT token and DB-based auth
       socketConnection.emit("device-authenticate", {
         deviceId: id,
         deviceToken,
@@ -474,6 +526,16 @@ function App() {
     socketConnection.on("device-authenticated", (data) => {
       if (data.success) {
         console.log("[YS] Device authenticated via socket");
+        // Cache device token if server sent a fresh one
+        if (data.deviceToken) {
+          store.get("registration").then((reg) => {
+            const regData = reg ? JSON.parse(reg) : {};
+            store.set(
+              "registration",
+              JSON.stringify({ ...regData, deviceToken: data.deviceToken }),
+            );
+          });
+        }
       } else {
         console.warn("[YS] Socket auth failed:", data.error);
       }
@@ -587,15 +649,19 @@ function App() {
       if (!response.ok) return;
 
       const data = await response.json();
-      if (data.success && data.status === "active") {
+      // "reported" (lost) devices MUST keep tracking — that's the whole point
+      const shouldTrack =
+        data.success &&
+        (data.status === "active" || data.status === "reported");
+      if (shouldTrack) {
         setIsActive(true);
-        // Ensure tracking is running when device is active
+        // Ensure tracking is running when device is active or reported lost
         if (!trackingActiveRef.current) {
           startTracking(id);
         }
-      } else if (data.success && data.status !== "active") {
+      } else if (data.success) {
         setIsActive(false);
-        // Stop tracking if device becomes inactive
+        // Stop tracking only for truly inactive states (installed, verified, recovered)
         if (trackingActiveRef.current) {
           stopTracking();
         }

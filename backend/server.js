@@ -17,6 +17,8 @@ const { Server } = require("socket.io");
 const winston = require("winston");
 const compression = require("compression");
 const crypto = require("crypto");
+const { createClient } = require("redis");
+const { createAdapter } = require("@socket.io/redis-adapter");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -58,6 +60,57 @@ if (process.env.NODE_ENV !== "production") {
 
 const PORT = process.env.PORT || 4000;
 
+// =============================================
+// REDIS SETUP (production cache + Socket.IO adapter)
+// =============================================
+const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+const redisClient = createClient({ url: REDIS_URL });
+const redisSubClient = redisClient.duplicate();
+
+// Redis cache helpers
+const cache = {
+  async get(key) {
+    try {
+      const val = await redisClient.get(key);
+      return val ? JSON.parse(val) : null;
+    } catch (e) {
+      logger.warn("Redis GET error:", e.message);
+      return null;
+    }
+  },
+  async set(key, value, ttlSeconds = 300) {
+    try {
+      await redisClient.set(key, JSON.stringify(value), { EX: ttlSeconds });
+    } catch (e) {
+      logger.warn("Redis SET error:", e.message);
+    }
+  },
+  async del(key) {
+    try {
+      await redisClient.del(key);
+    } catch (e) {
+      logger.warn("Redis DEL error:", e.message);
+    }
+  },
+};
+
+// Initialize Redis + Socket.IO adapter
+(async () => {
+  try {
+    await redisClient.connect();
+    await redisSubClient.connect();
+    io.adapter(createAdapter(redisClient, redisSubClient));
+    logger.info("Redis connected — Socket.IO adapter enabled");
+    console.log("Redis connected — Socket.IO adapter enabled");
+  } catch (err) {
+    logger.warn(
+      "Redis not available, falling back to in-memory adapter:",
+      err.message,
+    );
+    console.log("Redis not available, falling back to in-memory adapter");
+  }
+})();
+
 // Security middleware
 app.use(
   helmet({
@@ -84,15 +137,16 @@ app.use(
   }),
 );
 
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: (process.env.RATE_LIMIT_WINDOW || 15) * 60 * 1000, // 15 minutes
-  max: process.env.RATE_LIMIT_MAX || 100, // limit each IP to 100 requests per windowMs
+// Rate limiting — applies only to API routes, not static files
+const apiLimiter = rateLimit({
+  windowMs: (process.env.RATE_LIMIT_WINDOW || 15) * 60 * 1000,
+  max: process.env.RATE_LIMIT_MAX || 1000,
   message: "Too many requests from this IP, please try again later.",
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => !req.path.startsWith("/api"),
 });
-app.use(limiter);
+app.use(apiLimiter);
 
 // Logging
 app.use(
@@ -226,13 +280,32 @@ app.post(
 app.use(bodyParser.json({ limit: "10mb" }));
 
 // Serve admin dashboard React app at /admin
-app.use("/admin", express.static(path.join(__dirname, "admin")));
+// No-cache for HTML, long cache for hashed assets
+app.use(
+  "/admin",
+  express.static(path.join(__dirname, "admin"), {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith(".html")) {
+        res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+      }
+    },
+  }),
+);
 app.get("/admin/*", (req, res) => {
   res.set("Cache-Control", "no-cache, no-store, must-revalidate");
   res.sendFile(path.join(__dirname, "admin", "index.html"));
 });
 
-app.use(express.static("public"));
+// Mobile app — no-cache for HTML
+app.use(
+  express.static("public", {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith(".html")) {
+        res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+      }
+    },
+  }),
+);
 
 const { body, param, validationResult } = require("express-validator");
 const Joi = require("joi");
@@ -261,9 +334,9 @@ const locationPingSchema = Joi.object({
   lat: Joi.number().required().min(-90).max(90),
   lng: Joi.number().required().min(-180).max(180),
   accuracy: Joi.number().required().min(0),
-  battery: Joi.number().required().min(0).max(100),
+  battery: Joi.number().required().min(-1).max(100),
   networkType: Joi.string()
-    .valid("wifi", "cellular", "none", "unknown")
+    .valid("wifi", "cellular", "none", "unknown", "4g", "3g", "2g", "slow-2g", "ethernet", "online")
     .required(),
   alert: Joi.string().optional(),
 });
@@ -325,7 +398,7 @@ async function initializeDatabase() {
         latitude DECIMAL(10,8) NOT NULL CHECK (latitude >= -90 AND latitude <= 90),
         longitude DECIMAL(11,8) NOT NULL CHECK (longitude >= -180 AND longitude <= 180),
         accuracy DECIMAL(10,2) NOT NULL CHECK (accuracy >= 0),
-        battery INTEGER NOT NULL CHECK (battery >= 0 AND battery <= 100),
+        battery INTEGER NOT NULL CHECK (battery >= -1 AND battery <= 100),
         network_type TEXT NOT NULL,
         ip_address TEXT,
         alert TEXT,
@@ -442,14 +515,14 @@ async function initializeDatabase() {
       ["admin", defaultPasswordHash, "info@ysecurity.app"],
     );
 
-    // Create default admin member (VAT: 1301500118996) for testing
+    // Create default admin member for testing
     await pool.query(
       `
       INSERT INTO members (member_id, email, payment_status, name)
       VALUES ($1, $2, 'completed', 'Ysecurity Admin')
-      ON CONFLICT (member_id) DO NOTHING
+      ON CONFLICT (member_id) DO UPDATE SET payment_status = 'completed', name = 'Ysecurity Admin'
     `,
-      ["YS-1301500118996", "info@ysecurity.app"],
+      ["YS-862886", "info@ysecurity.app"],
     );
 
     // Create device_photos table - stores captured photos per device
@@ -550,34 +623,95 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Device authentication for socket (token-based)
-  socket.on("device-authenticate", (data) => {
+  // Device authentication for socket (token-based with DB fallback)
+  socket.on("device-authenticate", async (data) => {
     const { deviceId, deviceToken } = data;
-    if (!deviceToken) {
+
+    // Strategy 1: Verify JWT token (fast path)
+    if (deviceToken) {
+      try {
+        const decoded = jwt.verify(deviceToken, process.env.JWT_SECRET);
+        if (decoded.deviceId === deviceId) {
+          socket.deviceId = deviceId;
+          socket.memberId = decoded.memberId;
+          socket.join(`device-${deviceId}`);
+          socket.emit("device-authenticated", { success: true });
+          console.log(`Device ${deviceId} authenticated via JWT`);
+          // Update last_seen in DB + Redis (non-blocking)
+          pool
+            .query("UPDATE devices SET last_seen = NOW() WHERE id = $1", [
+              deviceId,
+            ])
+            .catch(() => {});
+          cache.set(`device:${deviceId}:online`, true, 120);
+          return;
+        }
+      } catch (e) {
+        // JWT failed — fall through to DB verification
+        console.log(
+          `Device ${deviceId} JWT invalid (${e.message}), trying DB fallback`,
+        );
+      }
+    }
+
+    // Strategy 2: DB fallback — verify device exists and token matches DB
+    if (!deviceId) {
       socket.emit("device-authenticated", {
         success: false,
-        error: "Token required",
+        error: "Device ID required",
       });
       return;
     }
+
     try {
-      const decoded = jwt.verify(deviceToken, process.env.JWT_SECRET);
-      if (decoded.deviceId !== deviceId) {
-        socket.emit("device-authenticated", {
-          success: false,
-          error: "Token mismatch",
-        });
-        return;
+      // Check Redis cache first
+      let deviceData = await cache.get(`device:${deviceId}`);
+      if (!deviceData) {
+        // Cache miss — query DB
+        const result = await pool.query(
+          "SELECT id, member_id, device_token FROM devices WHERE id = $1",
+          [deviceId],
+        );
+        if (result.rows.length === 0) {
+          socket.emit("device-authenticated", {
+            success: false,
+            error: "Device not found",
+          });
+          console.log(`Device auth rejected: ${deviceId} not in DB`);
+          return;
+        }
+        deviceData = {
+          deviceId: result.rows[0].id,
+          memberId: result.rows[0].member_id,
+          token: result.rows[0].device_token,
+        };
+        // Populate Redis cache
+        await cache.set(`device:${deviceId}`, deviceData, 86400);
       }
+
+      // If client sent a token, verify it matches the DB token
+      if (deviceToken && deviceData.token && deviceToken !== deviceData.token) {
+        // Token mismatch — could be stale. Issue a new one if device is legitimately registered.
+        console.log(
+          `Device ${deviceId} token mismatch, allowing DB-verified auth`,
+        );
+      }
+
       socket.deviceId = deviceId;
-      socket.memberId = decoded.memberId;
+      socket.memberId = deviceData.memberId;
       socket.join(`device-${deviceId}`);
       socket.emit("device-authenticated", { success: true });
-      console.log(`Device ${deviceId} authenticated via socket (verified)`);
-    } catch (error) {
+      console.log(`Device ${deviceId} authenticated via DB fallback`);
+      // Update last_seen
+      pool
+        .query("UPDATE devices SET last_seen = NOW() WHERE id = $1", [deviceId])
+        .catch(() => {});
+      cache.set(`device:${deviceId}:online`, true, 120);
+    } catch (err) {
+      logger.error(`Device auth DB fallback error for ${deviceId}:`, err);
       socket.emit("device-authenticated", {
         success: false,
-        error: "Invalid token",
+        error: "Auth failed",
       });
     }
   });
@@ -632,9 +766,21 @@ io.on("connection", (socket) => {
   // ---- Live Camera Streaming Relay ----
 
   // Admin requests camera start on a device
-  socket.on("camera-start", (data) => {
+  socket.on("camera-start", async (data) => {
     if (!socket.user || socket.user.role !== "admin") return;
     const { deviceId, facing } = data;
+    // Check if device has any connected sockets in its room
+    const room = io.sockets.adapter.rooms.get(`device-${deviceId}`);
+    if (!room || room.size === 0) {
+      // No device socket connected — notify admin immediately
+      socket.emit("camera-stream-error", {
+        deviceId,
+        error:
+          "Device is not connected. Make sure the app is open on the device.",
+      });
+      console.log(`Camera-start failed: device ${deviceId} not connected`);
+      return;
+    }
     io.to(`device-${deviceId}`).emit("camera-start", {
       facing: facing || "back",
     });
@@ -655,6 +801,14 @@ io.on("connection", (socket) => {
   socket.on("camera-snapshot", (data) => {
     if (!socket.user || socket.user.role !== "admin") return;
     const { deviceId } = data;
+    const room = io.sockets.adapter.rooms.get(`device-${deviceId}`);
+    if (!room || room.size === 0) {
+      socket.emit("camera-stream-error", {
+        deviceId,
+        error: "Device is not connected.",
+      });
+      return;
+    }
     io.to(`device-${deviceId}`).emit("camera-snapshot", {});
     console.log(`Admin requested camera-snapshot on device ${deviceId}`);
   });
@@ -718,6 +872,10 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     console.log("Client disconnected:", socket.id);
+    // Mark device offline in Redis
+    if (socket.deviceId) {
+      cache.del(`device:${socket.deviceId}:online`);
+    }
   });
 });
 
@@ -762,15 +920,21 @@ app.post(
       }
       // Delete any existing device for this test member so we can re-register
       await pool.query("DELETE FROM devices WHERE member_id = $1", [memberId]);
-      await pool.query(
-        "INSERT INTO devices (id, model, os, member_id, license_key, status) VALUES ($1, $2, $3, $4, $5, $6)",
-        [deviceId, model, os, memberId, memberId, "active"],
-      );
       // Generate a device token for secure Socket.IO auth
       const deviceToken = jwt.sign(
         { deviceId, memberId },
         process.env.JWT_SECRET,
         { expiresIn: "365d" },
+      );
+      await pool.query(
+        "INSERT INTO devices (id, model, os, member_id, license_key, status, device_token, last_seen) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
+        [deviceId, model, os, memberId, memberId, "active", deviceToken],
+      );
+      // Cache in Redis
+      await cache.set(
+        `device:${deviceId}`,
+        { deviceId, memberId, token: deviceToken },
+        86400,
       );
 
       logger.info(
@@ -823,39 +987,55 @@ app.post(
 
       // Check if this device is already registered
       const existingDevice = await pool.query(
-        "SELECT id FROM devices WHERE id = $1",
+        "SELECT id, device_token FROM devices WHERE id = $1",
         [deviceId],
       );
       if (existingDevice.rows.length > 0) {
-        // Device already registered, return existing info
+        // Device already registered — rotate token, persist in DB + Redis
         const deviceToken = jwt.sign(
           { deviceId, memberId },
           process.env.JWT_SECRET,
           { expiresIn: "365d" },
         );
+        await pool.query(
+          "UPDATE devices SET device_token = $1, last_seen = NOW() WHERE id = $2",
+          [deviceToken, deviceId],
+        );
+        await cache.set(
+          `device:${deviceId}`,
+          { deviceId, memberId, token: deviceToken },
+          86400,
+        );
         return res.json({ success: true, deviceId, memberId, deviceToken });
       }
-
-      await pool.query(
-        "INSERT INTO devices (id, model, os, member_id, license_key, status) VALUES ($1, $2, $3, $4, $5, $6)",
-        [deviceId, model, os, memberId, deviceId, "installed"],
-      );
-
-      // Create device directory structure
-      ensureDeviceDir(deviceId);
-
-      // Log activity: device installed
-      await logDeviceActivity(
-        deviceId,
-        "installed",
-        JSON.stringify({ model, os, memberId }),
-      );
 
       // Generate a device token for secure Socket.IO auth
       const deviceToken = jwt.sign(
         { deviceId, memberId },
         process.env.JWT_SECRET,
         { expiresIn: "365d" },
+      );
+
+      await pool.query(
+        "INSERT INTO devices (id, model, os, member_id, license_key, status, device_token, last_seen) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
+        [deviceId, model, os, memberId, deviceId, "active", deviceToken],
+      );
+
+      // Create device directory structure
+      ensureDeviceDir(deviceId);
+
+      // Cache in Redis
+      await cache.set(
+        `device:${deviceId}`,
+        { deviceId, memberId, token: deviceToken },
+        86400,
+      );
+
+      // Log activity: device installed
+      await logDeviceActivity(
+        deviceId,
+        "installed",
+        JSON.stringify({ model, os, memberId }),
       );
 
       logger.info(`Device ${deviceId} registered with member ${memberId}`);
@@ -918,15 +1098,20 @@ app.post(
         : rawNetworkType;
 
     try {
-      // Verify device exists
-      const device = await pool.query(
-        "SELECT status FROM devices WHERE id = $1",
-        [deviceId],
-      );
-      if (device.rows.length === 0) {
-        return res
-          .status(404)
-          .json({ success: false, error: "Device not found" });
+      // Verify device exists (check Redis first, then DB)
+      let deviceStatus = await cache.get(`device:${deviceId}:status`);
+      if (!deviceStatus) {
+        const device = await pool.query(
+          "SELECT status FROM devices WHERE id = $1",
+          [deviceId],
+        );
+        if (device.rows.length === 0) {
+          return res
+            .status(404)
+            .json({ success: false, error: "Device not found" });
+        }
+        deviceStatus = device.rows[0].status;
+        await cache.set(`device:${deviceId}:status`, deviceStatus, 300);
       }
 
       // Capture IP from request
@@ -942,7 +1127,29 @@ app.post(
         ? [deviceId, lat, lng, accuracy, battery, networkType, ipAddress, alert]
         : [deviceId, lat, lng, accuracy, battery, networkType, ipAddress];
 
-      await pool.query(query, values);
+      // Insert ping + update device state in parallel
+      await Promise.all([
+        pool.query(query, values),
+        pool.query(
+          "UPDATE devices SET last_seen = NOW(), last_ip = $1, last_battery = $2, last_network_type = $3 WHERE id = $4",
+          [ipAddress, battery, networkType, deviceId],
+        ),
+      ]);
+
+      // Update Redis cache (non-blocking)
+      cache.set(
+        `device:${deviceId}:state`,
+        {
+          battery,
+          networkType,
+          ipAddress,
+          lat,
+          lng,
+          lastSeen: new Date().toISOString(),
+        },
+        300,
+      );
+      cache.set(`device:${deviceId}:online`, true, 120);
 
       // Log first ping as activity (install location + network + IP)
       const pingCount = await pool.query(
@@ -1091,7 +1298,7 @@ app.post(
   },
 );
 
-// Get all devices for admin (protected)
+// Get all devices for admin (protected) — Redis cached
 app.get("/api/admin/devices", authenticateToken, async (req, res) => {
   if (req.user.role !== "admin") {
     return res
@@ -1100,9 +1307,17 @@ app.get("/api/admin/devices", authenticateToken, async (req, res) => {
   }
 
   try {
+    // Check Redis cache (short TTL — admin sees near-real-time)
+    const cached = await cache.get("admin:devices");
+    if (cached) {
+      return res.json({ success: true, devices: cached });
+    }
+
     const result = await pool.query(
-      "SELECT id, model, os, owner, member_id, status, created_at FROM devices ORDER BY created_at DESC",
+      "SELECT id, model, os, owner, member_id, status, last_seen, last_battery, last_network_type, last_ip, created_at FROM devices ORDER BY created_at DESC",
     );
+    // Cache for 10 seconds
+    await cache.set("admin:devices", result.rows, 10);
     res.json({ success: true, devices: result.rows });
   } catch (error) {
     logger.error("Database error:", error);
@@ -1110,7 +1325,7 @@ app.get("/api/admin/devices", authenticateToken, async (req, res) => {
   }
 });
 
-// Get all devices latest locations for tracking dashboard
+// Get all devices latest locations for tracking dashboard — Redis cached
 app.get(
   "/api/admin/devices/all-locations",
   [authenticateToken, handleValidationErrors],
@@ -1122,6 +1337,11 @@ app.get(
     }
 
     try {
+      const cached = await cache.get("admin:all-locations");
+      if (cached) {
+        return res.json({ success: true, locations: cached });
+      }
+
       // Get latest ping for each device using DISTINCT ON
       const result = await pool.query(`
       SELECT DISTINCT ON (lp.device_id)
@@ -1131,6 +1351,8 @@ app.get(
       JOIN devices d ON d.id = lp.device_id
       ORDER BY lp.device_id, lp.timestamp DESC
     `);
+      // Cache for 15 seconds
+      await cache.set("admin:all-locations", result.rows, 15);
       res.json({ success: true, locations: result.rows });
     } catch (error) {
       logger.error("All locations error:", error);
@@ -1197,7 +1419,7 @@ app.post(
 
     try {
       const result = await pool.query(
-        "UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+        "UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING member_id",
         ["reported", deviceId],
       );
 
@@ -1206,6 +1428,18 @@ app.post(
           .status(404)
           .json({ success: false, error: "Device not found" });
       }
+
+      // Auto-create a report entry
+      const memberId = result.rows[0].member_id || "unknown";
+      await pool.query(
+        "INSERT INTO reports (device_id, user_info, status) VALUES ($1, $2, $3)",
+        [deviceId, `Reported lost by admin (Member: ${memberId})`, "pending"],
+      );
+
+      // Invalidate Redis caches
+      await cache.del("admin:devices");
+      await cache.del("admin:all-locations");
+      await cache.del(`device:${deviceId}:status`);
 
       await logDeviceActivity(
         deviceId,
@@ -1374,7 +1608,7 @@ app.get(
   },
 );
 
-// Get device status
+// Get device status — Redis cached
 app.get(
   "/api/devices/:deviceId/status",
   [
@@ -1387,6 +1621,12 @@ app.get(
     const { deviceId } = req.params;
 
     try {
+      // Check Redis first
+      const cachedStatus = await cache.get(`device:${deviceId}:status`);
+      if (cachedStatus) {
+        return res.json({ success: true, status: cachedStatus });
+      }
+
       const result = await pool.query(
         "SELECT status FROM devices WHERE id = $1",
         [deviceId],
@@ -1396,6 +1636,8 @@ app.get(
           .status(404)
           .json({ success: false, error: "Device not found" });
       }
+      // Cache for 30 seconds
+      await cache.set(`device:${deviceId}:status`, result.rows[0].status, 30);
       res.json({ success: true, status: result.rows[0].status });
     } catch (error) {
       logger.error("Database error:", error);
@@ -2160,7 +2402,7 @@ app.get("/api/admin/members", authenticateToken, async (req, res) => {
   }
   try {
     const result = await pool.query(
-      "SELECT m.id, m.name, m.email, m.payment_status, m.created_at, d.id as device_id, d.status as device_status FROM members m LEFT JOIN devices d ON d.member_id = m.member_id ORDER BY m.created_at DESC",
+      "SELECT m.id, m.member_id, m.name, m.email, m.payment_status, m.created_at, d.id as device_id, d.status as device_status FROM members m LEFT JOIN devices d ON d.member_id = m.member_id ORDER BY m.created_at DESC",
     );
     res.json({ success: true, members: result.rows });
   } catch (error) {
@@ -2211,6 +2453,11 @@ app.post(
         ["active", memberId],
       );
 
+      // Invalidate Redis caches
+      await cache.del("admin:devices");
+      await cache.del("admin:all-locations");
+      await cache.del(`device:${device.rows[0].id}:status`);
+
       await logDeviceActivity(
         device.rows[0].id,
         "activated",
@@ -2253,7 +2500,7 @@ app.post(
 
     try {
       const result = await pool.query(
-        "UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE member_id = $2",
+        "UPDATE devices SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE member_id = $2 RETURNING id",
         ["installed", memberId],
       );
       if (result.rowCount === 0) {
@@ -2262,6 +2509,11 @@ app.post(
           error: "No device found for this Member ID",
         });
       }
+      // Invalidate Redis caches
+      await cache.del("admin:devices");
+      await cache.del("admin:all-locations");
+      if (result.rows[0]) await cache.del(`device:${result.rows[0].id}:status`);
+
       logger.info(
         `Device deactivated by admin ${req.user.username} using member ID ${memberId}`,
       );

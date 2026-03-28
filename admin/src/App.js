@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   AppBar,
   Toolbar,
@@ -566,6 +566,7 @@ function AdminDashboard() {
             onMarkAsLost={markAsLost}
             onSendCommand={sendCommand}
             onActivate={() => setActivateDialog({ open: true, memberId: "" })}
+            onRecoverDevice={(memberId) => activateDevice(memberId)}
             onDeactivate={deactivateDevice}
             onResetDevice={(deviceId, memberId) =>
               setConfirmResetDialog({ open: true, deviceId, memberId })
@@ -745,9 +746,10 @@ function TabPanel(props) {
       hidden={value !== index}
       id={`admin-tabpanel-${index}`}
       aria-labelledby={`admin-tab-${index}`}
+      style={{ display: value === index ? "block" : "none" }}
       {...other}
     >
-      {value === index && <Box sx={{ p: 3 }}>{children}</Box>}
+      <Box sx={{ p: 3 }}>{children}</Box>
     </div>
   );
 }
@@ -761,6 +763,7 @@ function DevicesTab({
   onMarkAsLost,
   onSendCommand,
   onActivate,
+  onRecoverDevice,
   onDeactivate,
   onResetDevice,
 }) {
@@ -790,6 +793,29 @@ function DevicesTab({
   const [cameraFacing, setCameraFacing] = useState("back");
   const [cameraError, setCameraError] = useState(null);
 
+  // Auto-refresh deviceDir when devices prop changes (e.g. after activation)
+  useEffect(() => {
+    if (!selectedDeviceId || !deviceDir) return;
+    const updatedDevice = devices.find((d) => d.id === selectedDeviceId);
+    if (
+      updatedDevice &&
+      deviceDir.device &&
+      updatedDevice.status !== deviceDir.device.status
+    ) {
+      // Status changed — reload the directory to get fresh data
+      openDeviceDirectory(selectedDeviceId);
+    }
+  }, [devices]);
+
+  // Auto-refresh device directory every 30s when viewing a device
+  useEffect(() => {
+    if (!selectedDeviceId) return;
+    const refreshInterval = setInterval(() => {
+      openDeviceDirectory(selectedDeviceId);
+    }, 30000);
+    return () => clearInterval(refreshInterval);
+  }, [selectedDeviceId]);
+
   // Socket listeners for live camera streaming
   useEffect(() => {
     if (!socket) return;
@@ -797,6 +823,11 @@ function DevicesTab({
     const onFrame = (data) => {
       if (data.deviceId === selectedDeviceId) {
         setCameraPreview("data:image/jpeg;base64," + data.frame);
+        // Clear timeout — camera is working
+        if (cameraTimeoutRef.current) {
+          clearTimeout(cameraTimeoutRef.current);
+          cameraTimeoutRef.current = null;
+        }
       }
     };
     const onStreamStarted = (data) => {
@@ -804,6 +835,10 @@ function DevicesTab({
         setIsCameraActive(true);
         setCameraFacing(data.facing || "back");
         setCameraError(null);
+        if (cameraTimeoutRef.current) {
+          clearTimeout(cameraTimeoutRef.current);
+          cameraTimeoutRef.current = null;
+        }
       }
     };
     const onStreamStopped = (data) => {
@@ -841,16 +876,36 @@ function DevicesTab({
     };
   }, [socket, selectedDeviceId, openFolder]);
 
+  const cameraTimeoutRef = useRef(null);
+
   const startCamera = (deviceId, facing) => {
-    if (!socket) return;
+    if (!socket || !socket.connected) {
+      setCameraError("Not connected to server. Please refresh the page.");
+      return;
+    }
     setCameraPreview(null);
     setCameraError(null);
     setCameraFacing(facing);
+    setIsCameraActive(true); // Show "connecting" state immediately
     socket.emit("camera-start", { deviceId, facing });
+
+    // Timeout: if no stream-started or frame received within 15s, show error
+    // (timeout is cleared in onFrame/onStreamStarted handlers)
+    if (cameraTimeoutRef.current) clearTimeout(cameraTimeoutRef.current);
+    cameraTimeoutRef.current = setTimeout(() => {
+      setCameraError(
+        "Camera did not respond. The device may be offline or camera permission was denied on the device.",
+      );
+      setIsCameraActive(false);
+    }, 15000);
   };
 
   const stopCamera = (deviceId) => {
     if (!socket) return;
+    if (cameraTimeoutRef.current) {
+      clearTimeout(cameraTimeoutRef.current);
+      cameraTimeoutRef.current = null;
+    }
     socket.emit("camera-stop", { deviceId });
     setIsCameraActive(false);
     setCameraPreview(null);
@@ -1081,7 +1136,8 @@ function DevicesTab({
                 >
                   <CircularProgress sx={{ color: "white" }} />
                   <Typography sx={{ mt: 1, color: "#aaa" }}>
-                    Connecting to {cameraFacing === "back" ? "back" : "front"} camera...
+                    Connecting to {cameraFacing === "back" ? "back" : "front"}{" "}
+                    camera...
                   </Typography>
                   <IconButton
                     onClick={() => stopCamera(selectedDeviceId)}
@@ -1131,7 +1187,7 @@ function DevicesTab({
                     startIcon={<CameraAlt />}
                     onClick={() => startCamera(selectedDeviceId, "front")}
                   >
-                    Front Camera
+                    📡 Live Front Camera
                   </Button>
                   <Button
                     variant="contained"
@@ -1139,8 +1195,52 @@ function DevicesTab({
                     startIcon={<CameraAlt />}
                     onClick={() => startCamera(selectedDeviceId, "back")}
                   >
-                    Back Camera
+                    📡 Live Back Camera
                   </Button>
+                </Box>
+              )}
+
+              {/* Blind snapshot fallback — works via HTTP command polling, no socket needed */}
+              {!isCameraActive && (
+                <Box sx={{ mt: 2, textAlign: "center" }}>
+                  <Typography
+                    variant="caption"
+                    color="textSecondary"
+                    sx={{ display: "block", mb: 1 }}
+                  >
+                    If live preview doesn't work, use blind capture (photo taken
+                    within 15s):
+                  </Typography>
+                  <Box
+                    sx={{ display: "flex", gap: 1, justifyContent: "center" }}
+                  >
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      startIcon={<Photo />}
+                      onClick={() => {
+                        onSendCommand(selectedDeviceId, "camera", {
+                          facing: "front",
+                        });
+                        setTimeout(() => openFolderContent("pictures"), 16000);
+                      }}
+                    >
+                      📷 Snap Front
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      startIcon={<Photo />}
+                      onClick={() => {
+                        onSendCommand(selectedDeviceId, "camera", {
+                          facing: "back",
+                        });
+                        setTimeout(() => openFolderContent("pictures"), 16000);
+                      }}
+                    >
+                      📷 Snap Back
+                    </Button>
+                  </Box>
                 </Box>
               )}
             </CardContent>
@@ -1716,17 +1816,18 @@ function DevicesTab({
                 </Grid>
                 {/* Action buttons */}
                 <Box sx={{ mt: 2, display: "flex", gap: 1, flexWrap: "wrap" }}>
-                  {device.status !== "active" && (
-                    <Button
-                      size="small"
-                      variant="contained"
-                      color="success"
-                      startIcon={<PlayArrow />}
-                      onClick={() => onActivate()}
-                    >
-                      Activate Device
-                    </Button>
-                  )}
+                  {device.status !== "active" &&
+                    device.status !== "reported" && (
+                      <Button
+                        size="small"
+                        variant="contained"
+                        color="success"
+                        startIcon={<PlayArrow />}
+                        onClick={() => onActivate()}
+                      >
+                        Activate Device
+                      </Button>
+                    )}
                   {device.status === "active" && (
                     <Button
                       size="small"
@@ -1738,7 +1839,19 @@ function DevicesTab({
                       Mark as Lost
                     </Button>
                   )}
-                  {device.status === "active" && (
+                  {device.status === "reported" && (
+                    <Button
+                      size="small"
+                      variant="contained"
+                      color="success"
+                      startIcon={<PlayArrow />}
+                      onClick={() => onRecoverDevice(device.member_id)}
+                    >
+                      Recover Device
+                    </Button>
+                  )}
+                  {(device.status === "active" ||
+                    device.status === "reported") && (
                     <Button
                       size="small"
                       variant="outlined"
@@ -1755,7 +1868,9 @@ function DevicesTab({
                     color="warning"
                     startIcon={<Alarm />}
                     onClick={() => onSendCommand(device.id, "alarm")}
-                    disabled={device.status !== "active"}
+                    disabled={
+                      device.status !== "active" && device.status !== "reported"
+                    }
                   >
                     Alarm
                   </Button>
@@ -1765,7 +1880,9 @@ function DevicesTab({
                     color="info"
                     startIcon={<CameraAlt />}
                     onClick={() => openFolderContent("pictures")}
-                    disabled={device.status !== "active"}
+                    disabled={
+                      device.status !== "active" && device.status !== "reported"
+                    }
                   >
                     Camera
                   </Button>
@@ -1774,7 +1891,9 @@ function DevicesTab({
                     variant="outlined"
                     color="secondary"
                     startIcon={<LocationOn />}
-                    disabled={device.status !== "active"}
+                    disabled={
+                      device.status !== "active" && device.status !== "reported"
+                    }
                     onClick={() => {
                       const lat = latestLocation ? latestLocation.latitude : "";
                       const lng = latestLocation
@@ -1796,7 +1915,9 @@ function DevicesTab({
                     color="error"
                     startIcon={<Delete />}
                     onClick={() => onResetDevice(device.id, device.member_id)}
-                    disabled={device.status !== "active"}
+                    disabled={
+                      device.status !== "active" && device.status !== "reported"
+                    }
                   >
                     Delete
                   </Button>
@@ -2191,7 +2312,10 @@ function DevicesTab({
                       }}
                       color="warning"
                       title="Trigger Alarm"
-                      disabled={device.status !== "active"}
+                      disabled={
+                        device.status !== "active" &&
+                        device.status !== "reported"
+                      }
                     >
                       <Alarm />
                     </IconButton>
@@ -2204,7 +2328,10 @@ function DevicesTab({
                       }}
                       color="info"
                       title="Live Camera"
-                      disabled={device.status !== "active"}
+                      disabled={
+                        device.status !== "active" &&
+                        device.status !== "reported"
+                      }
                     >
                       <CameraAlt />
                     </IconButton>
@@ -2289,17 +2416,18 @@ function MembersTab({ members, onDelete, onActivate }) {
                     {format(new Date(member.created_at), "MMM dd, yyyy")}
                   </TableCell>
                   <TableCell>
-                    {member.device_id && member.device_status !== "active" && (
-                      <Button
-                        size="small"
-                        variant="outlined"
-                        color="success"
-                        onClick={() => onActivate(member.member_id)}
-                        sx={{ mr: 1 }}
-                      >
-                        Activate
-                      </Button>
-                    )}
+                    {member.device_id &&
+                      member.device_status === "installed" && (
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          color="success"
+                          onClick={() => onActivate(member.member_id)}
+                          sx={{ mr: 1 }}
+                        >
+                          Activate
+                        </Button>
+                      )}
                     <IconButton
                       size="small"
                       onClick={() => onDelete(member.member_id)}
@@ -2517,7 +2645,8 @@ function AnalyticsTab({ analytics }) {
               Active Tracking
             </Typography>
             <Typography variant="h4" color="error">
-              {analytics.activeDevices || 0}
+              {(analytics.activeDevices || 0) +
+                (analytics.reportedDevices || 0)}
             </Typography>
           </CardContent>
         </Card>
