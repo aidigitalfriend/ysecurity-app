@@ -19,6 +19,14 @@ const compression = require("compression");
 const crypto = require("crypto");
 const { createClient } = require("redis");
 const { createAdapter } = require("@socket.io/redis-adapter");
+const webpush = require("web-push");
+
+// Web Push VAPID setup
+webpush.setVapidDetails(
+  "mailto:info@ysecurity.app",
+  process.env.VAPID_PUBLIC_KEY,
+  process.env.VAPID_PRIVATE_KEY,
+);
 
 const app = express();
 app.set("trust proxy", 1);
@@ -560,6 +568,19 @@ async function initializeDatabase() {
       )
     `);
 
+    // Create push_subscriptions table for Web Push
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id SERIAL PRIMARY KEY,
+        device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+        endpoint TEXT NOT NULL,
+        p256dh TEXT NOT NULL,
+        auth TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(device_id, endpoint)
+      )
+    `);
+
     // Create device uploads directory
     const uploadsDir = path.join(__dirname, "uploads");
     if (!fs.existsSync(uploadsDir)) {
@@ -766,6 +787,14 @@ io.on("connection", (socket) => {
         timestamp: new Date().toISOString(),
       });
 
+      // Also send push notification to wake device if browser tab is closed
+      pushToDevice(deviceId, {
+        type: "command",
+        command,
+        params: params || {},
+        commandId: result.rows[0].id,
+      });
+
       socket.emit("command-sent", { commandId: result.rows[0].id });
       logger.info(
         `Command ${command} sent to device ${deviceId} by admin ${socket.user.username}`,
@@ -785,13 +814,18 @@ io.on("connection", (socket) => {
     // Check if device has any connected sockets in its room
     const room = io.sockets.adapter.rooms.get(`device-${deviceId}`);
     if (!room || room.size === 0) {
-      // No device socket connected — notify admin immediately
+      // No device socket connected — try to wake it via push
+      pushToDevice(deviceId, {
+        type: "command",
+        command: "camera-start",
+        params: { facing: facing || "back" },
+      });
       socket.emit("camera-stream-error", {
         deviceId,
         error:
-          "Device is not connected. Make sure the app is open on the device.",
+          "Device is not connected. Sending wake-up push — try again in a few seconds.",
       });
-      console.log(`Camera-start failed: device ${deviceId} not connected`);
+      console.log(`Camera-start: device ${deviceId} not connected, push sent`);
       return;
     }
     io.to(`device-${deviceId}`).emit("camera-start", {
@@ -998,13 +1032,46 @@ app.post(
           .json({ success: false, error: "Membership payment not completed" });
       }
 
-      // Check if this device is already registered
+      // ── Deduplication: same member + same model + same OS = same device ──
+      // This prevents different browsers / private windows from creating
+      // duplicate device entries for the same physical phone.
+      const existingByFingerprint = await pool.query(
+        "SELECT id, device_token FROM devices WHERE member_id = $1 AND model = $2 AND os = $3 LIMIT 1",
+        [memberId, model, os],
+      );
+      if (existingByFingerprint.rows.length > 0) {
+        const existingId = existingByFingerprint.rows[0].id;
+        const deviceToken = jwt.sign(
+          { deviceId: existingId, memberId },
+          process.env.JWT_SECRET,
+          { expiresIn: "365d" },
+        );
+        await pool.query(
+          "UPDATE devices SET device_token = $1, last_seen = NOW(), status = 'active' WHERE id = $2",
+          [deviceToken, existingId],
+        );
+        await cache.set(
+          `device:${existingId}`,
+          { deviceId: existingId, memberId, token: deviceToken },
+          86400,
+        );
+        logger.info(
+          `Device ${existingId} reconnected (dedup by member+model+os)`,
+        );
+        return res.json({
+          success: true,
+          deviceId: existingId,
+          memberId,
+          deviceToken,
+        });
+      }
+
+      // Check if this exact device ID is already registered
       const existingDevice = await pool.query(
         "SELECT id, device_token FROM devices WHERE id = $1",
         [deviceId],
       );
       if (existingDevice.rows.length > 0) {
-        // Device already registered — rotate token, persist in DB + Redis
         const deviceToken = jwt.sign(
           { deviceId, memberId },
           process.env.JWT_SECRET,
@@ -1065,6 +1132,85 @@ app.post(
 // Health check (also used by mobile for RTT-based network detection)
 app.head("/api/health", (req, res) => res.sendStatus(200));
 app.get("/api/health", (req, res) => res.json({ ok: true }));
+
+// Android APK download
+app.get("/download/android", (req, res) => {
+  const apkPath = path.join(__dirname, "public", "ysecurity.apk");
+  if (fs.existsSync(apkPath)) {
+    res.download(apkPath, "ysecurity.apk");
+  } else {
+    res.status(404).json({ error: "APK not available yet" });
+  }
+});
+
+// VAPID public key (client needs this to subscribe)
+app.get("/api/push/vapid-key", (req, res) => {
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY });
+});
+
+// Save push subscription for a device
+app.post(
+  "/api/devices/:deviceId/push-subscribe",
+  [
+    param("deviceId").isLength({ min: 10, max: 100 }),
+    body("subscription.endpoint").isURL(),
+    body("subscription.keys.p256dh").isString().isLength({ min: 1 }),
+    body("subscription.keys.auth").isString().isLength({ min: 1 }),
+    handleValidationErrors,
+  ],
+  async (req, res) => {
+    const { deviceId } = req.params;
+    const { subscription } = req.body;
+    try {
+      await pool.query(
+        `INSERT INTO push_subscriptions (device_id, endpoint, p256dh, auth)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (device_id, endpoint) DO UPDATE SET p256dh = $3, auth = $4`,
+        [
+          deviceId,
+          subscription.endpoint,
+          subscription.keys.p256dh,
+          subscription.keys.auth,
+        ],
+      );
+      res.json({ success: true });
+    } catch (error) {
+      logger.error("Push subscribe error:", error);
+      res
+        .status(500)
+        .json({ success: false, error: "Failed to save subscription" });
+    }
+  },
+);
+
+// Helper: send push notification to a device
+async function pushToDevice(deviceId, payload) {
+  try {
+    const subs = await pool.query(
+      "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE device_id = $1",
+      [deviceId],
+    );
+    for (const sub of subs.rows) {
+      const pushSub = {
+        endpoint: sub.endpoint,
+        keys: { p256dh: sub.p256dh, auth: sub.auth },
+      };
+      try {
+        await webpush.sendNotification(pushSub, JSON.stringify(payload));
+      } catch (err) {
+        if (err.statusCode === 410 || err.statusCode === 404) {
+          // Subscription expired — remove it
+          await pool.query(
+            "DELETE FROM push_subscriptions WHERE device_id = $1 AND endpoint = $2",
+            [deviceId, sub.endpoint],
+          );
+        }
+      }
+    }
+  } catch (e) {
+    logger.error("Push to device error:", e);
+  }
+}
 
 // Location ping with validation and authentication
 app.post(
@@ -1462,6 +1608,10 @@ app.post(
       logger.info(
         `Device ${deviceId} marked as lost by admin ${req.user.username}`,
       );
+
+      // Send push to wake the device immediately for tracking
+      pushToDevice(deviceId, { type: "track" });
+
       res.json({ success: true, message: "Device marked as lost" });
     } catch (error) {
       logger.error("Database error:", error);
@@ -2607,12 +2757,10 @@ app.delete(
     try {
       // Protect default admin member from deletion
       if (memberId === "YS-862886") {
-        return res
-          .status(403)
-          .json({
-            success: false,
-            error: "Cannot delete the default admin member",
-          });
+        return res.status(403).json({
+          success: false,
+          error: "Cannot delete the default admin member",
+        });
       }
 
       // Delete device first (cascades to location_pings, commands, etc.)
@@ -3068,4 +3216,26 @@ server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
   console.log("Real-time features enabled via Socket.IO");
+
+  // Periodic push ping for "reported" (lost) devices — every 3 minutes
+  setInterval(
+    async () => {
+      try {
+        const lost = await pool.query(
+          "SELECT id FROM devices WHERE status = 'reported'",
+        );
+        for (const device of lost.rows) {
+          pushToDevice(device.id, { type: "track" });
+        }
+        if (lost.rows.length > 0) {
+          console.log(
+            `Push ping sent to ${lost.rows.length} reported device(s)`,
+          );
+        }
+      } catch (e) {
+        // Silent — don't crash on push errors
+      }
+    },
+    3 * 60 * 1000,
+  );
 });

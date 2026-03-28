@@ -60,8 +60,8 @@ const store = {
 const SCREEN = {
   LOADING: "loading",
   LOGIN: "login",
-  INSTALLING: "installing",
-  INSTALLED: "installed",
+  PERMISSIONS: "permissions",
+  ACTIVE: "active",
 };
 
 function App() {
@@ -79,6 +79,9 @@ function App() {
   // Login form
   const [memberId, setMemberId] = useState("");
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  // Permissions state
+  const [permissionsGranted, setPermissionsGranted] = useState(false);
 
   // Tracking state
   const [geofence, setGeofence] = useState(null);
@@ -124,6 +127,103 @@ function App() {
   }, [batteryLevel]);
 
   // =============================================
+  // SERVICE WORKER & PUSH NOTIFICATIONS
+  // =============================================
+  const registerServiceWorker = async (id, token) => {
+    if (!("serviceWorker" in navigator)) return;
+    try {
+      const reg = await navigator.serviceWorker.register("/sw.js");
+      console.log("[YS] Service Worker registered");
+
+      // Send device info to SW
+      if (reg.active) {
+        reg.active.postMessage({
+          type: "REGISTER_DEVICE",
+          deviceId: id,
+          deviceToken: token,
+        });
+      }
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (navigator.serviceWorker.controller) {
+          navigator.serviceWorker.controller.postMessage({
+            type: "REGISTER_DEVICE",
+            deviceId: id,
+            deviceToken: token,
+          });
+        }
+      });
+
+      // Listen for push wake-up messages from SW
+      navigator.serviceWorker.addEventListener("message", (event) => {
+        if (event.data && event.data.type === "TRACK_NOW") {
+          // SW woke us up — send a fresh ping
+          if (deviceIdRef.current) {
+            startTracking(deviceIdRef.current);
+          }
+        }
+        if (event.data && event.data.type === "EXECUTE_COMMAND") {
+          executeCommand({
+            command: event.data.command,
+            params: event.data.params,
+          });
+        }
+        if (event.data && event.data.type === "GET_REGISTRATION") {
+          // SW asking for registration data
+          store.get("registration").then((cached) => {
+            if (cached && event.ports && event.ports[0]) {
+              const data = JSON.parse(cached);
+              event.ports[0].postMessage({
+                deviceId: data.deviceId,
+                deviceToken: data.deviceToken,
+              });
+            }
+          });
+        }
+      });
+
+      // Subscribe to push notifications
+      await subscribeToPush(reg, id);
+    } catch (e) {
+      console.warn("[YS] SW registration failed:", e);
+    }
+  };
+
+  const subscribeToPush = async (swReg, id) => {
+    try {
+      // Get VAPID public key from server
+      const keyRes = await fetch(
+        API_BASE.replace("/api", "") + "/api/push/vapid-key",
+      );
+      const { publicKey } = await keyRes.json();
+
+      // Convert base64 to Uint8Array
+      const urlBase64ToUint8Array = (base64String) => {
+        const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+        const base64 = (base64String + padding)
+          .replace(/-/g, "+")
+          .replace(/_/g, "/");
+        const rawData = window.atob(base64);
+        return Uint8Array.from([...rawData].map((c) => c.charCodeAt(0)));
+      };
+
+      const subscription = await swReg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      });
+
+      // Send subscription to server
+      await fetch(`${API_BASE}/devices/${id}/push-subscribe`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subscription: subscription.toJSON() }),
+      });
+      console.log("[YS] Push subscription saved");
+    } catch (e) {
+      console.warn("[YS] Push subscription failed:", e);
+    }
+  };
+
+  // =============================================
   // INITIALIZATION
   // =============================================
   useEffect(() => {
@@ -131,6 +231,7 @@ function App() {
     setupNetworkListener();
     startBatteryMonitoring();
     loadCachedData();
+
     return () => {
       if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
       if (commandIntervalRef.current) clearInterval(commandIntervalRef.current);
@@ -189,6 +290,7 @@ function App() {
         setIsRegistered(true);
         setMemberId(registration.memberId);
 
+        registerServiceWorker(id, registration.deviceToken);
         initSocket(id);
         startStatusChecks(id);
         startCommandPolling(id);
@@ -299,15 +401,7 @@ function App() {
       );
 
       setIsRegistered(true);
-      setScreen(SCREEN.INSTALLING);
-
-      setTimeout(() => {
-        initSocket(id);
-        startStatusChecks(id);
-        startCommandPolling(id);
-        startTracking(id);
-        setScreen(SCREEN.INSTALLED);
-      }, 3000);
+      setScreen(SCREEN.PERMISSIONS);
     } catch (err) {
       console.error("Login failed:", err);
       setError(err.message);
@@ -318,6 +412,24 @@ function App() {
 
   // Request all permissions upfront so they work silently later (e.g. when device is lost)
   const requestAllPermissions = async () => {
+    if (isNative) {
+      // Request Capacitor permissions
+      try {
+        await Camera.requestPermissions();
+        console.log("[YS] Camera permission granted (native)");
+      } catch (e) {
+        console.warn("[YS] Camera permission denied (native):", e.message);
+      }
+      try {
+        // eslint-disable-next-line no-undef
+        await Geolocation.requestPermissions();
+        console.log("[YS] Location permission granted (native)");
+      } catch (e) {
+        console.warn("[YS] Location permission denied (native):", e.message);
+      }
+      // Add other permissions if needed
+    }
+
     // Camera — request once, browser remembers the grant
     try {
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
@@ -446,11 +558,19 @@ function App() {
 
       const data = await response.json();
 
+      // Server may return a different deviceId (dedup: same member+model+os = same device)
+      const assignedId = data.deviceId || id;
+      if (assignedId !== id) {
+        setDeviceId(assignedId);
+        deviceIdRef.current = assignedId;
+        localStorage.setItem("ys_device_id", assignedId);
+      }
+
       setMemberId(data.memberId || DEFAULT_MEMBER_ID);
       await store.set(
         "registration",
         JSON.stringify({
-          deviceId: id,
+          deviceId: assignedId,
           memberId: data.memberId || DEFAULT_MEMBER_ID,
           deviceToken: data.deviceToken,
           registeredAt: new Date().toISOString(),
@@ -463,16 +583,31 @@ function App() {
       // Request location permission (triggered by user gesture from button tap)
       try {
         if (navigator.geolocation) {
-          navigator.geolocation.getCurrentPosition(() => {}, () => {}, { timeout: 5000 });
+          navigator.geolocation.getCurrentPosition(
+            () => {},
+            () => {},
+            { timeout: 5000 },
+          );
         }
       } catch (e) {}
 
+      // Register service worker + push for background tracking
+      registerServiceWorker(assignedId, data.deviceToken);
+
       setTimeout(() => {
-        initSocket(id);
-        startStatusChecks(id);
-        startCommandPolling(id);
-        startTracking(id);
-        setScreen(SCREEN.INSTALLED);
+        initSocket(assignedId);
+        startStatusChecks(assignedId);
+        startCommandPolling(assignedId);
+        startTracking(assignedId);
+        // If running in browser (not standalone PWA), show "Add to Home Screen" guide
+        const standalone =
+          window.matchMedia("(display-mode: standalone)").matches ||
+          window.navigator.standalone === true;
+        if (!standalone && !isNative) {
+          setScreen(SCREEN.PERMISSIONS);
+        } else {
+          setScreen(SCREEN.ACTIVE);
+        }
       }, 2000);
     } catch (err) {
       console.error("Install failed:", err);
@@ -1461,6 +1596,8 @@ function App() {
 
   // LOGIN SCREEN
   if (screen === SCREEN.LOGIN) {
+    const isAndroidBrowser = /Android/.test(navigator.userAgent) && !isNative;
+
     return (
       <div style={styles.container}>
         <div style={styles.card}>
@@ -1478,20 +1615,49 @@ function App() {
 
           {error && <div style={styles.error}>{error}</div>}
 
+          {isAndroidBrowser && (
+            <a
+              href="/download/android"
+              style={{
+                ...styles.button,
+                display: "block",
+                background: "linear-gradient(135deg, #1a73e8, #1565c0)",
+                fontSize: "17px",
+                padding: "16px",
+                marginBottom: "12px",
+                textAlign: "center",
+                textDecoration: "none",
+                color: "#fff",
+                borderRadius: "14px",
+              }}
+            >
+              📲 Download Android App (Recommended)
+            </a>
+          )}
+
           <button
             style={{
               ...styles.button,
-              background: "linear-gradient(135deg, #4caf50, #2e7d32)",
-              fontSize: "18px",
-              padding: "18px",
+              background: isAndroidBrowser
+                ? "rgba(255,255,255,0.08)"
+                : "linear-gradient(135deg, #4caf50, #2e7d32)",
+              fontSize: isAndroidBrowser ? "15px" : "18px",
+              padding: isAndroidBrowser ? "14px" : "18px",
               marginBottom: "20px",
               opacity: isLoggingIn ? 0.6 : 1,
               cursor: isLoggingIn ? "not-allowed" : "pointer",
+              border: isAndroidBrowser
+                ? "1px solid rgba(255,255,255,0.15)"
+                : "none",
             }}
             onClick={handleTestMode}
             disabled={isLoggingIn}
           >
-            {isLoggingIn ? "⏳ Installing..." : "🛡️ Install Protection Now"}
+            {isLoggingIn
+              ? "⏳ Installing..."
+              : isAndroidBrowser
+                ? "Or continue with web version"
+                : "🛡️ Install Protection Now"}
           </button>
         </div>
       </div>
@@ -1549,7 +1715,53 @@ function App() {
     );
   }
 
-  // INSTALLED SCREEN — Dormant/Active with live status
+
+
+  // PERMISSIONS SCREEN
+  if (screen === SCREEN.PERMISSIONS) {
+    const handleGrantPermissions = async () => {
+      await requestAllPermissions();
+      setPermissionsGranted(true);
+      setScreen(SCREEN.ACTIVE);
+      // Start tracking after permissions
+      startTracking(deviceId);
+      initSocket(deviceId);
+      startStatusChecks(deviceId);
+      startCommandPolling(deviceId);
+    };
+
+    return (
+      <div style={styles.container}>
+        <div style={styles.card}>
+          <div style={{ textAlign: "center", marginBottom: "24px" }}>
+            <div style={{ fontSize: "48px", marginBottom: "12px" }}>🔐</div>
+            <h2
+              style={{ margin: "0 0 8px", fontSize: "20px", fontWeight: "700" }}
+            >
+              Grant Permissions
+            </h2>
+            <p style={{ margin: 0, fontSize: "14px", opacity: 0.7 }}>
+              Allow camera, location, and other permissions for security tracking
+            </p>
+          </div>
+
+          <button
+            style={{
+              ...styles.button,
+              background: "linear-gradient(135deg, #1a73e8, #1565c0)",
+              fontSize: "17px",
+              padding: "16px",
+            }}
+            onClick={handleGrantPermissions}
+          >
+            Grant Permissions & Continue
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ACTIVE SCREEN — Dormant/Active with live status
   return (
     <div style={styles.container}>
       <div style={styles.card}>

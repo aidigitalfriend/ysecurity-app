@@ -26,5 +26,6 @@
   "remote.SSH.defaultExtensions": [
     "dbaeumer.vscode-eslint",
     "esbenp.prettier-vscode"
-  ]
+  ],
+  "java.configuration.updateBuildConfiguration": "interactive"
 }
