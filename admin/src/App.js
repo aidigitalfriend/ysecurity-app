@@ -64,6 +64,7 @@ import {
   SignalCellularAlt,
   ArrowBack,
   Info,
+  Close,
 } from "@mui/icons-material";
 import { MapContainer, TileLayer, Marker, Popup, Circle } from "react-leaflet";
 import {
@@ -998,8 +999,8 @@ function DevicesTab({
                     src={cameraPreview}
                     alt="Live camera"
                     style={{
-                      maxWidth: "100%",
-                      maxHeight: 400,
+                      width: "100%",
+                      maxHeight: 480,
                       objectFit: "contain",
                     }}
                   />
@@ -1014,6 +1015,58 @@ function DevicesTab({
                       fontWeight: "bold",
                     }}
                   />
+                  {/* Close button */}
+                  <IconButton
+                    onClick={() => stopCamera(selectedDeviceId)}
+                    sx={{
+                      position: "absolute",
+                      top: 4,
+                      right: 4,
+                      bgcolor: "rgba(0,0,0,0.6)",
+                      color: "white",
+                      "&:hover": { bgcolor: "rgba(255,0,0,0.7)" },
+                    }}
+                    size="small"
+                  >
+                    <Close />
+                  </IconButton>
+                  {/* Bottom controls overlay */}
+                  <Box
+                    sx={{
+                      position: "absolute",
+                      bottom: 0,
+                      left: 0,
+                      right: 0,
+                      py: 1.5,
+                      display: "flex",
+                      justifyContent: "center",
+                      gap: 1,
+                      bgcolor: "rgba(0,0,0,0.5)",
+                    }}
+                  >
+                    <Button
+                      variant="contained"
+                      color="success"
+                      size="large"
+                      startIcon={<Photo />}
+                      onClick={() => takeSnapshot(selectedDeviceId)}
+                    >
+                      📷 Take Snapshot
+                    </Button>
+                    <Button
+                      variant="contained"
+                      size="small"
+                      sx={{ bgcolor: "rgba(255,255,255,0.2)", color: "white" }}
+                      onClick={() =>
+                        switchCamera(
+                          selectedDeviceId,
+                          cameraFacing === "back" ? "front" : "back",
+                        )
+                      }
+                    >
+                      🔄 {cameraFacing === "back" ? "Front" : "Back"}
+                    </Button>
+                  </Box>
                 </Box>
               ) : isCameraActive ? (
                 <Box
@@ -1023,12 +1076,27 @@ function DevicesTab({
                     bgcolor: "#000",
                     borderRadius: 1,
                     py: 8,
+                    position: "relative",
                   }}
                 >
                   <CircularProgress sx={{ color: "white" }} />
                   <Typography sx={{ mt: 1, color: "#aaa" }}>
-                    Waiting for camera stream...
+                    Connecting to {cameraFacing === "back" ? "back" : "front"} camera...
                   </Typography>
+                  <IconButton
+                    onClick={() => stopCamera(selectedDeviceId)}
+                    sx={{
+                      position: "absolute",
+                      top: 4,
+                      right: 4,
+                      bgcolor: "rgba(0,0,0,0.6)",
+                      color: "white",
+                      "&:hover": { bgcolor: "rgba(255,0,0,0.7)" },
+                    }}
+                    size="small"
+                  >
+                    <Close />
+                  </IconButton>
                 </Box>
               ) : (
                 <Box
@@ -1047,67 +1115,34 @@ function DevicesTab({
                 </Box>
               )}
 
-              {/* Camera action buttons */}
-              <Box
-                sx={{
-                  display: "flex",
-                  gap: 1,
-                  flexWrap: "wrap",
-                  justifyContent: "center",
-                }}
-              >
-                {!isCameraActive ? (
-                  <>
-                    <Button
-                      variant="contained"
-                      color="info"
-                      startIcon={<CameraAlt />}
-                      onClick={() => startCamera(selectedDeviceId, "front")}
-                    >
-                      Front Camera
-                    </Button>
-                    <Button
-                      variant="contained"
-                      color="warning"
-                      startIcon={<CameraAlt />}
-                      onClick={() => startCamera(selectedDeviceId, "back")}
-                    >
-                      Back Camera
-                    </Button>
-                  </>
-                ) : (
-                  <>
-                    <Button
-                      variant="contained"
-                      color="success"
-                      startIcon={<Photo />}
-                      onClick={() => takeSnapshot(selectedDeviceId)}
-                    >
-                      📷 Take Snapshot
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      sx={{ color: "white", borderColor: "white" }}
-                      onClick={() =>
-                        switchCamera(
-                          selectedDeviceId,
-                          cameraFacing === "back" ? "front" : "back",
-                        )
-                      }
-                    >
-                      🔄 Switch to {cameraFacing === "back" ? "Front" : "Back"}
-                    </Button>
-                    <Button
-                      variant="contained"
-                      color="error"
-                      startIcon={<Stop />}
-                      onClick={() => stopCamera(selectedDeviceId)}
-                    >
-                      Stop Camera
-                    </Button>
-                  </>
-                )}
-              </Box>
+              {/* Camera action buttons — only show when not streaming */}
+              {!isCameraActive && (
+                <Box
+                  sx={{
+                    display: "flex",
+                    gap: 1,
+                    flexWrap: "wrap",
+                    justifyContent: "center",
+                  }}
+                >
+                  <Button
+                    variant="contained"
+                    color="info"
+                    startIcon={<CameraAlt />}
+                    onClick={() => startCamera(selectedDeviceId, "front")}
+                  >
+                    Front Camera
+                  </Button>
+                  <Button
+                    variant="contained"
+                    color="warning"
+                    startIcon={<CameraAlt />}
+                    onClick={() => startCamera(selectedDeviceId, "back")}
+                  >
+                    Back Camera
+                  </Button>
+                </Box>
+              )}
             </CardContent>
           </Card>
 
@@ -1729,9 +1764,7 @@ function DevicesTab({
                     variant="outlined"
                     color="info"
                     startIcon={<CameraAlt />}
-                    onClick={() =>
-                      setCameraDialog({ open: true, deviceId: device.id })
-                    }
+                    onClick={() => openFolderContent("pictures")}
                     disabled={device.status !== "active"}
                   >
                     Camera
@@ -2166,10 +2199,11 @@ function DevicesTab({
                       size="small"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setCameraDialog({ open: true, deviceId: device.id });
+                        openDeviceDirectory(device.id);
+                        setTimeout(() => openFolderContent("pictures"), 500);
                       }}
                       color="info"
-                      title="Take Photo"
+                      title="Live Camera"
                       disabled={device.status !== "active"}
                     >
                       <CameraAlt />

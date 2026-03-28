@@ -1563,7 +1563,9 @@ function App() {
             }}
           >
             <span style={{ opacity: 0.6 }}>Battery</span>
-            <span>🔋 {batteryLevel >= 0 ? `${batteryLevel}%` : "Detecting..."}</span>
+            <span>
+              🔋 {batteryLevel >= 0 ? `${batteryLevel}%` : "Detecting..."}
+            </span>
           </div>
           {isActive && lastPingTime && (
             <div
