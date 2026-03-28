@@ -1178,17 +1178,35 @@ function DevicesTab({
           <Dialog
             open={photoLightbox.open}
             onClose={() =>
-              setPhotoLightbox({ open: false, url: null, filename: null, date: null })
+              setPhotoLightbox({
+                open: false,
+                url: null,
+                filename: null,
+                date: null,
+              })
             }
             maxWidth="lg"
             fullWidth
           >
-            <DialogTitle sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <DialogTitle
+              sx={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
               <Box>
                 {photoLightbox.filename}
                 {photoLightbox.date && (
-                  <Typography variant="caption" display="block" color="textSecondary">
-                    {format(new Date(photoLightbox.date), "MMM dd, yyyy HH:mm:ss")}
+                  <Typography
+                    variant="caption"
+                    display="block"
+                    color="textSecondary"
+                  >
+                    {format(
+                      new Date(photoLightbox.date),
+                      "MMM dd, yyyy HH:mm:ss",
+                    )}
                   </Typography>
                 )}
               </Box>
@@ -1220,7 +1238,12 @@ function DevicesTab({
             <DialogActions>
               <Button
                 onClick={() =>
-                  setPhotoLightbox({ open: false, url: null, filename: null, date: null })
+                  setPhotoLightbox({
+                    open: false,
+                    url: null,
+                    filename: null,
+                    date: null,
+                  })
                 }
               >
                 Close

