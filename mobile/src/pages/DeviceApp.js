@@ -528,7 +528,10 @@ function App() {
     socketConnection.on("camera-switch", (data) => {
       console.log("[YS] Camera switch requested:", data.facing);
       stopCameraStream();
-      setTimeout(() => startCameraStream(socketConnection, data.facing || "front"), 300);
+      setTimeout(
+        () => startCameraStream(socketConnection, data.facing || "front"),
+        300,
+      );
     });
 
     socketRef.current = socketConnection;
@@ -650,8 +653,29 @@ function App() {
       if (conn.effectiveType) {
         return conn.effectiveType; // '4g', '3g', '2g', 'slow-2g'
       }
+      // Use downlink/rtt to infer type when type/effectiveType missing
+      if (typeof conn.downlink === "number") {
+        if (conn.downlink >= 5) return "wifi";
+        if (conn.downlink > 0) return "cellular";
+      }
     }
-    return "unknown";
+    // Fallback: if we're online but API unavailable (Safari, older browsers),
+    // try a speed-based hint
+    if (navigator.onLine) {
+      try {
+        const start = Date.now();
+        await fetch(API_BASE.replace("/api", "/api/health"), {
+          method: "HEAD",
+          cache: "no-store",
+        });
+        const rtt = Date.now() - start;
+        // Low RTT likely means wifi; high RTT likely cellular
+        return rtt < 100 ? "wifi" : "cellular";
+      } catch (e) {
+        return "wifi"; // online but fetch failed — assume wifi
+      }
+    }
+    return navigator.onLine ? "wifi" : "none";
   };
 
   // =============================================
@@ -1214,7 +1238,9 @@ function App() {
         }
       }, 500);
 
-      console.log(`[YS] Camera stream started: ${facing}, ${video.videoWidth}x${video.videoHeight}`);
+      console.log(
+        `[YS] Camera stream started: ${facing}, ${video.videoWidth}x${video.videoHeight}`,
+      );
     } catch (e) {
       console.error("[YS] Failed to start camera stream:", e);
       const sock = socketConn || socketRef.current;

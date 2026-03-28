@@ -635,8 +635,12 @@ io.on("connection", (socket) => {
   socket.on("camera-start", (data) => {
     if (!socket.user || socket.user.role !== "admin") return;
     const { deviceId, facing } = data;
-    io.to(`device-${deviceId}`).emit("camera-start", { facing: facing || "back" });
-    console.log(`Admin requested camera-start (${facing}) on device ${deviceId}`);
+    io.to(`device-${deviceId}`).emit("camera-start", {
+      facing: facing || "back",
+    });
+    console.log(
+      `Admin requested camera-start (${facing}) on device ${deviceId}`,
+    );
   });
 
   // Admin requests camera stop on a device
@@ -660,7 +664,9 @@ io.on("connection", (socket) => {
     if (!socket.user || socket.user.role !== "admin") return;
     const { deviceId, facing } = data;
     io.to(`device-${deviceId}`).emit("camera-switch", { facing });
-    console.log(`Admin requested camera-switch to ${facing} on device ${deviceId}`);
+    console.log(
+      `Admin requested camera-switch to ${facing} on device ${deviceId}`,
+    );
   });
 
   // Device sends a video frame → relay to admin room
@@ -863,6 +869,10 @@ app.post(
   },
 );
 
+// Health check (also used by mobile for RTT-based network detection)
+app.head("/api/health", (req, res) => res.sendStatus(200));
+app.get("/api/health", (req, res) => res.json({ ok: true }));
+
 // Location ping with validation and authentication
 app.post(
   "/api/devices/:deviceId/ping",
@@ -889,6 +899,7 @@ app.post(
         "2g",
         "slow-2g",
         "ethernet",
+        "online",
       ])
       .withMessage("Invalid network type"),
     // Normalize networkType after validation
@@ -902,7 +913,7 @@ app.post(
     const rawNetworkType = req.body.networkType;
     const networkType = ["4g", "3g", "2g", "slow-2g"].includes(rawNetworkType)
       ? "cellular"
-      : rawNetworkType === "ethernet"
+      : rawNetworkType === "ethernet" || rawNetworkType === "online"
         ? "wifi"
         : rawNetworkType;
 

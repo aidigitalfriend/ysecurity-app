@@ -97,6 +97,8 @@ const formatNetworkType = (type) => {
       return "Ethernet";
     case "none":
       return "No Connection";
+    case "online":
+      return "Online";
     case "unknown":
       return "Unknown";
     default:
@@ -960,7 +962,10 @@ function DevicesTab({
           {/* Live Camera Controls */}
           <Card sx={{ mb: 3, bgcolor: "#1a1a2e", color: "white" }}>
             <CardContent>
-              <Typography variant="subtitle1" sx={{ mb: 2, fontWeight: "bold" }}>
+              <Typography
+                variant="subtitle1"
+                sx={{ mb: 2, fontWeight: "bold" }}
+              >
                 🎥 Live Camera
               </Typography>
 
@@ -1037,7 +1042,14 @@ function DevicesTab({
               )}
 
               {/* Camera action buttons */}
-              <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", justifyContent: "center" }}>
+              <Box
+                sx={{
+                  display: "flex",
+                  gap: 1,
+                  flexWrap: "wrap",
+                  justifyContent: "center",
+                }}
+              >
                 {!isCameraActive ? (
                   <>
                     <Button
