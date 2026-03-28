@@ -87,20 +87,26 @@ const API_BASE =
 
 // Format network type for display
 const formatNetworkType = (type) => {
-  if (!type) return '—';
+  if (!type) return "—";
   switch (type) {
-    case 'wifi': return 'WiFi';
-    case 'cellular': return 'Cellular';
-    case 'ethernet': return 'Ethernet';
-    case 'none': return 'No Connection';
-    case 'unknown': return 'Unknown';
-    default: return type;
+    case "wifi":
+      return "WiFi";
+    case "cellular":
+      return "Cellular";
+    case "ethernet":
+      return "Ethernet";
+    case "none":
+      return "No Connection";
+    case "unknown":
+      return "Unknown";
+    default:
+      return type;
   }
 };
 
 // Format battery for display (-1 = unavailable)
 const formatBattery = (level) => {
-  if (level === null || level === undefined || level < 0) return 'N/A';
+  if (level === null || level === undefined || level < 0) return "N/A";
   return `${level}%`;
 };
 
@@ -552,6 +558,7 @@ function AdminDashboard() {
           <DevicesTab
             devices={devices}
             authToken={authToken}
+            socket={socket}
             onViewLocations={viewLocations}
             onMarkAsLost={markAsLost}
             onSendCommand={sendCommand}
@@ -746,6 +753,7 @@ function TabPanel(props) {
 function DevicesTab({
   devices,
   authToken,
+  socket,
   onViewLocations,
   onMarkAsLost,
   onSendCommand,
@@ -768,6 +776,87 @@ function DevicesTab({
     open: false,
     deviceId: null,
   });
+  const [cameraPreview, setCameraPreview] = useState(null); // base64 frame
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [cameraFacing, setCameraFacing] = useState("back");
+  const [cameraError, setCameraError] = useState(null);
+
+  // Socket listeners for live camera streaming
+  useEffect(() => {
+    if (!socket) return;
+
+    const onFrame = (data) => {
+      if (data.deviceId === selectedDeviceId) {
+        setCameraPreview("data:image/jpeg;base64," + data.frame);
+      }
+    };
+    const onStreamStarted = (data) => {
+      if (data.deviceId === selectedDeviceId) {
+        setIsCameraActive(true);
+        setCameraFacing(data.facing || "back");
+        setCameraError(null);
+      }
+    };
+    const onStreamStopped = (data) => {
+      if (data.deviceId === selectedDeviceId) {
+        setIsCameraActive(false);
+        setCameraPreview(null);
+      }
+    };
+    const onStreamError = (data) => {
+      if (data.deviceId === selectedDeviceId) {
+        setIsCameraActive(false);
+        setCameraPreview(null);
+        setCameraError(data.error || "Camera error");
+      }
+    };
+    const onSnapshotSaved = (data) => {
+      if (data.deviceId === selectedDeviceId && openFolder === "pictures") {
+        // Reload photos to show the new snapshot
+        openFolderContent("pictures");
+      }
+    };
+
+    socket.on("camera-frame", onFrame);
+    socket.on("camera-stream-started", onStreamStarted);
+    socket.on("camera-stream-stopped", onStreamStopped);
+    socket.on("camera-stream-error", onStreamError);
+    socket.on("camera-snapshot-saved", onSnapshotSaved);
+
+    return () => {
+      socket.off("camera-frame", onFrame);
+      socket.off("camera-stream-started", onStreamStarted);
+      socket.off("camera-stream-stopped", onStreamStopped);
+      socket.off("camera-stream-error", onStreamError);
+      socket.off("camera-snapshot-saved", onSnapshotSaved);
+    };
+  }, [socket, selectedDeviceId, openFolder]);
+
+  const startCamera = (deviceId, facing) => {
+    if (!socket) return;
+    setCameraPreview(null);
+    setCameraError(null);
+    setCameraFacing(facing);
+    socket.emit("camera-start", { deviceId, facing });
+  };
+
+  const stopCamera = (deviceId) => {
+    if (!socket) return;
+    socket.emit("camera-stop", { deviceId });
+    setIsCameraActive(false);
+    setCameraPreview(null);
+  };
+
+  const takeSnapshot = (deviceId) => {
+    if (!socket) return;
+    socket.emit("camera-snapshot", { deviceId });
+  };
+
+  const switchCamera = (deviceId, facing) => {
+    if (!socket) return;
+    setCameraFacing(facing);
+    socket.emit("camera-switch", { deviceId, facing });
+  };
 
   // Format helpers are defined at module level (formatNetworkType, formatBattery)
 
@@ -840,9 +929,17 @@ function DevicesTab({
 
   const goBack = () => {
     if (openFolder) {
+      // Stop camera when leaving pictures folder
+      if (openFolder === "pictures" && isCameraActive && selectedDeviceId) {
+        stopCamera(selectedDeviceId);
+      }
       setOpenFolder(null);
       setFolderData(null);
     } else {
+      // Stop camera when leaving device
+      if (isCameraActive && selectedDeviceId) {
+        stopCamera(selectedDeviceId);
+      }
       setSelectedDeviceId(null);
       setDeviceDir(null);
     }
@@ -859,9 +956,147 @@ function DevicesTab({
           <Typography variant="h6" gutterBottom>
             📸 Pictures ({photos.length})
           </Typography>
+
+          {/* Live Camera Controls */}
+          <Card sx={{ mb: 3, bgcolor: "#1a1a2e", color: "white" }}>
+            <CardContent>
+              <Typography variant="subtitle1" sx={{ mb: 2, fontWeight: "bold" }}>
+                🎥 Live Camera
+              </Typography>
+
+              {/* Camera error */}
+              {cameraError && (
+                <Alert severity="error" sx={{ mb: 2 }}>
+                  {cameraError}
+                </Alert>
+              )}
+
+              {/* Live preview */}
+              {cameraPreview ? (
+                <Box
+                  sx={{
+                    mb: 2,
+                    textAlign: "center",
+                    bgcolor: "#000",
+                    borderRadius: 1,
+                    overflow: "hidden",
+                    position: "relative",
+                  }}
+                >
+                  <img
+                    src={cameraPreview}
+                    alt="Live camera"
+                    style={{
+                      maxWidth: "100%",
+                      maxHeight: 400,
+                      objectFit: "contain",
+                    }}
+                  />
+                  <Chip
+                    label={`● LIVE — ${cameraFacing === "back" ? "Back" : "Front"} Camera`}
+                    color="error"
+                    size="small"
+                    sx={{
+                      position: "absolute",
+                      top: 8,
+                      left: 8,
+                      fontWeight: "bold",
+                    }}
+                  />
+                </Box>
+              ) : isCameraActive ? (
+                <Box
+                  sx={{
+                    mb: 2,
+                    textAlign: "center",
+                    bgcolor: "#000",
+                    borderRadius: 1,
+                    py: 8,
+                  }}
+                >
+                  <CircularProgress sx={{ color: "white" }} />
+                  <Typography sx={{ mt: 1, color: "#aaa" }}>
+                    Waiting for camera stream...
+                  </Typography>
+                </Box>
+              ) : (
+                <Box
+                  sx={{
+                    mb: 2,
+                    textAlign: "center",
+                    bgcolor: "#16213e",
+                    borderRadius: 1,
+                    py: 6,
+                  }}
+                >
+                  <CameraAlt sx={{ fontSize: 48, color: "#555" }} />
+                  <Typography sx={{ mt: 1, color: "#666" }}>
+                    Select a camera to start live preview
+                  </Typography>
+                </Box>
+              )}
+
+              {/* Camera action buttons */}
+              <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", justifyContent: "center" }}>
+                {!isCameraActive ? (
+                  <>
+                    <Button
+                      variant="contained"
+                      color="info"
+                      startIcon={<CameraAlt />}
+                      onClick={() => startCamera(selectedDeviceId, "front")}
+                    >
+                      Front Camera
+                    </Button>
+                    <Button
+                      variant="contained"
+                      color="warning"
+                      startIcon={<CameraAlt />}
+                      onClick={() => startCamera(selectedDeviceId, "back")}
+                    >
+                      Back Camera
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Button
+                      variant="contained"
+                      color="success"
+                      startIcon={<Photo />}
+                      onClick={() => takeSnapshot(selectedDeviceId)}
+                    >
+                      📷 Take Snapshot
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      sx={{ color: "white", borderColor: "white" }}
+                      onClick={() =>
+                        switchCamera(
+                          selectedDeviceId,
+                          cameraFacing === "back" ? "front" : "back",
+                        )
+                      }
+                    >
+                      🔄 Switch to {cameraFacing === "back" ? "Front" : "Back"}
+                    </Button>
+                    <Button
+                      variant="contained"
+                      color="error"
+                      startIcon={<Stop />}
+                      onClick={() => stopCamera(selectedDeviceId)}
+                    >
+                      Stop Camera
+                    </Button>
+                  </>
+                )}
+              </Box>
+            </CardContent>
+          </Card>
+
+          {/* Photo Gallery */}
           {photos.length === 0 ? (
             <Typography color="textSecondary">
-              No photos captured yet. Use the camera command to capture photos.
+              No photos captured yet. Start the camera above and take snapshots.
             </Typography>
           ) : (
             <Grid container spacing={2}>
@@ -939,7 +1174,8 @@ function DevicesTab({
                       <Popup>
                         {format(new Date(loc.timestamp), "MMM dd, HH:mm:ss")}
                         <br />
-                        Battery: {formatBattery(loc.battery)} | Net: {formatNetworkType(loc.network_type)}
+                        Battery: {formatBattery(loc.battery)} | Net:{" "}
+                        {formatNetworkType(loc.network_type)}
                       </Popup>
                     </Marker>
                   ))}
@@ -968,7 +1204,9 @@ function DevicesTab({
                           {Number(loc.longitude).toFixed(6)}
                         </TableCell>
                         <TableCell>{formatBattery(loc.battery)}</TableCell>
-                        <TableCell>{formatNetworkType(loc.network_type)}</TableCell>
+                        <TableCell>
+                          {formatNetworkType(loc.network_type)}
+                        </TableCell>
                         <TableCell>{loc.accuracy}m</TableCell>
                       </TableRow>
                     ))}
@@ -1091,7 +1329,9 @@ function DevicesTab({
                           <TableCell>
                             {format(new Date(h.timestamp), "MMM dd, HH:mm:ss")}
                           </TableCell>
-                          <TableCell>{formatNetworkType(h.network_type)}</TableCell>
+                          <TableCell>
+                            {formatNetworkType(h.network_type)}
+                          </TableCell>
                           <TableCell
                             sx={{ fontFamily: "monospace", fontSize: "0.8rem" }}
                           >
@@ -1512,8 +1752,10 @@ function DevicesTab({
                             "MMM dd, yyyy HH:mm:ss",
                           )}
                           <br />
-                          Battery: {formatBattery(latestLocation.battery)}<br />
-                          Network: {formatNetworkType(latestLocation.network_type)}
+                          Battery: {formatBattery(latestLocation.battery)}
+                          <br />
+                          Network:{" "}
+                          {formatNetworkType(latestLocation.network_type)}
                           <br />
                           IP: {latestLocation.ip_address || "—"}
                         </Popup>
@@ -1678,10 +1920,11 @@ function DevicesTab({
                 open={cameraDialog.open}
                 onClose={() => setCameraDialog({ open: false, deviceId: null })}
               >
-                <DialogTitle>Capture Photo</DialogTitle>
+                <DialogTitle>📸 Open Live Camera</DialogTitle>
                 <DialogContent>
                   <Typography variant="body2" sx={{ mb: 2 }}>
-                    Select which camera to use on the device.
+                    Select a camera to start live preview on this device. You
+                    can take snapshots from the Pictures folder.
                   </Typography>
                   <Box
                     sx={{
@@ -1697,12 +1940,11 @@ function DevicesTab({
                       size="large"
                       startIcon={<CameraAlt />}
                       onClick={() => {
-                        onSendCommand(
-                          cameraDialog.deviceId || device.id,
-                          "camera",
-                          { facing: "front" },
-                        );
+                        const devId = cameraDialog.deviceId || device.id;
+                        startCamera(devId, "front");
                         setCameraDialog({ open: false, deviceId: null });
+                        // Navigate to pictures folder
+                        openFolderContent("pictures");
                       }}
                     >
                       Front Camera
@@ -1713,12 +1955,11 @@ function DevicesTab({
                       size="large"
                       startIcon={<CameraAlt />}
                       onClick={() => {
-                        onSendCommand(
-                          cameraDialog.deviceId || device.id,
-                          "camera",
-                          { facing: "back" },
-                        );
+                        const devId = cameraDialog.deviceId || device.id;
+                        startCamera(devId, "back");
                         setCameraDialog({ open: false, deviceId: null });
+                        // Navigate to pictures folder
+                        openFolderContent("pictures");
                       }}
                     >
                       Back Camera
@@ -2019,7 +2260,8 @@ function TrackingTab({ locations, selectedDevice, authToken }) {
                   Time:{" "}
                   {format(new Date(loc.timestamp), "MMM dd, yyyy HH:mm:ss")}
                   <br />
-                  Battery: {formatBattery(loc.battery)}<br />
+                  Battery: {formatBattery(loc.battery)}
+                  <br />
                   Network: {formatNetworkType(loc.network_type)}
                   <br />
                   Accuracy: {loc.accuracy}m
