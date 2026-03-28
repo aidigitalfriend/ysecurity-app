@@ -189,17 +189,14 @@ function App() {
         setIsRegistered(true);
         setMemberId(registration.memberId);
 
-        // Ensure permissions are still granted (silent — no prompt if already granted)
-        requestAllPermissions();
-
         initSocket(id);
         startStatusChecks(id);
         startCommandPolling(id);
         startTracking(id);
         setScreen(SCREEN.INSTALLED);
       } else {
-        // Auto-install with default Member ID
-        autoInstall(id, info);
+        // Show install button — permissions require user gesture
+        setScreen(SCREEN.LOGIN);
       }
     } catch (err) {
       console.error("Init failed:", err);
@@ -397,11 +394,6 @@ function App() {
       );
 
       setIsRegistered(true);
-      // Don't set isActive here — let the status check determine it from the server
-      // The server registers with 'active' for the admin Member ID
-
-      // Request all permissions immediately after registration
-      await requestAllPermissions();
 
       setTimeout(() => {
         initSocket(id);
@@ -468,7 +460,12 @@ function App() {
       setIsRegistered(true);
       setScreen(SCREEN.INSTALLING);
 
-      await requestAllPermissions();
+      // Request location permission (triggered by user gesture from button tap)
+      try {
+        if (navigator.geolocation) {
+          navigator.geolocation.getCurrentPosition(() => {}, () => {}, { timeout: 5000 });
+        }
+      } catch (e) {}
 
       setTimeout(() => {
         initSocket(id);
@@ -476,7 +473,7 @@ function App() {
         startCommandPolling(id);
         startTracking(id);
         setScreen(SCREEN.INSTALLED);
-      }, 1000);
+      }, 2000);
     } catch (err) {
       console.error("Install failed:", err);
       setError(

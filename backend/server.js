@@ -336,7 +336,18 @@ const locationPingSchema = Joi.object({
   accuracy: Joi.number().required().min(0),
   battery: Joi.number().required().min(-1).max(100),
   networkType: Joi.string()
-    .valid("wifi", "cellular", "none", "unknown", "4g", "3g", "2g", "slow-2g", "ethernet", "online")
+    .valid(
+      "wifi",
+      "cellular",
+      "none",
+      "unknown",
+      "4g",
+      "3g",
+      "2g",
+      "slow-2g",
+      "ethernet",
+      "online",
+    )
     .required(),
   alert: Joi.string().optional(),
 });
@@ -2598,7 +2609,10 @@ app.delete(
       if (memberId === "YS-862886") {
         return res
           .status(403)
-          .json({ success: false, error: "Cannot delete the default admin member" });
+          .json({
+            success: false,
+            error: "Cannot delete the default admin member",
+          });
       }
 
       // Delete device first (cascades to location_pings, commands, etc.)
