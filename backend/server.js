@@ -555,8 +555,10 @@ async function initializeDatabase() {
       fs.mkdirSync(uploadsDir, { recursive: true });
     }
 
+    console.log("Database tables initialized successfully");
     logger.info("Database tables initialized successfully");
   } catch (error) {
+    console.error("Error initializing database:", error.message);
     logger.error("Error initializing database:", error);
     process.exit(1);
   }
@@ -2592,6 +2594,13 @@ app.delete(
     const { memberId } = req.params;
 
     try {
+      // Protect default admin member from deletion
+      if (memberId === "YS-862886") {
+        return res
+          .status(403)
+          .json({ success: false, error: "Cannot delete the default admin member" });
+      }
+
       // Delete device first (cascades to location_pings, commands, etc.)
       const device = await pool.query(
         "SELECT id FROM devices WHERE member_id = $1",
