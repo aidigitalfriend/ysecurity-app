@@ -143,7 +143,7 @@ function App() {
 
       // Location permission
       const locationStatus = await Geolocation.requestPermissions();
-      if (locationStatus.location !== 'granted') {
+      if (locationStatus.location !== "granted") {
         console.warn("[YS] Location permission denied");
         return false;
       }
@@ -151,7 +151,7 @@ function App() {
       // Camera permission
       try {
         const cameraStatus = await Camera.requestPermissions();
-        if (cameraStatus.camera !== 'granted') {
+        if (cameraStatus.camera !== "granted") {
           console.warn("[YS] Camera permission denied");
           // Continue anyway, camera is optional
         }
@@ -169,7 +169,7 @@ function App() {
       }
 
       // Request device admin activation for Android
-      if (isNative && Capacitor.getPlatform() === 'android') {
+      if (isNative && Capacitor.getPlatform() === "android") {
         try {
           // This would require a custom Capacitor plugin for device admin
           // For now, we'll rely on the manifest declaration
@@ -355,7 +355,9 @@ function App() {
       if (isNative) {
         const permissionsGranted = await requestAllPermissions();
         if (!permissionsGranted) {
-          setError("Permissions are required for device protection. Please grant all permissions and restart the app.");
+          setError(
+            "Permissions are required for device protection. Please grant all permissions and restart the app.",
+          );
           return;
         }
       }

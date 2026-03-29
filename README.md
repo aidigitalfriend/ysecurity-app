@@ -1,6 +1,7 @@
 # ysecurity-app
 
 ## Overview
+
 ysecurity-app is a comprehensive device tracking and security system designed for anti-theft protection. The system consists of a mobile app (device-side) and a backend server that work together to provide location tracking, device management, and security features.
 
 **Important Note on Activation:** The system is installed in a dormant state and does not activate tracking or any security features upon installation. Activation only occurs after a user reports the device as lost/stolen, provides verification information, and the security team manually verifies and confirms the report. Only then is the device marked as lost, and the system activates to begin tracking and security measures.
@@ -8,6 +9,7 @@ ysecurity-app is a comprehensive device tracking and security system designed fo
 ## Setup Instructions
 
 ### Backend Setup
+
 1. Navigate to the `backend` directory
 2. Run `npm install` to install dependencies
 3. Update the Stripe secret key and email credentials in `server.js`
@@ -15,6 +17,7 @@ ysecurity-app is a comprehensive device tracking and security system designed fo
 5. Access admin interface at `https://ysecurity.app/admin.html`
 
 ### Mobile App Setup
+
 1. Navigate to the `mobile` directory
 2. Run `npm install` to install dependencies
 3. For web development: `npm start`
@@ -26,16 +29,18 @@ ysecurity-app is a comprehensive device tracking and security system designed fo
 ## App (Device Side)
 
 ### Core Features
-| Feature | Implementation |
-|---------|---------------|
-| Silent install — no app icon visible | Capacitor + Android LAUNCHER category removed |
-| One device = one license | Device fingerprint (IMEI-style ID) registered to server — 2nd install blocked |
-| Background GPS ping (screen off) | Capacitor Background Geolocation plugin |
-| Auto-start on reboot | Android BOOT_COMPLETED broadcast receiver |
-| Can't be uninstalled easily | Android device admin privileges (locks uninstall) |
-| Sends battery %, network type, GPS accuracy | Included in each ping |
+
+| Feature                                     | Implementation                                                                |
+| ------------------------------------------- | ----------------------------------------------------------------------------- |
+| Silent install — no app icon visible        | Capacitor + Android LAUNCHER category removed                                 |
+| One device = one license                    | Device fingerprint (IMEI-style ID) registered to server — 2nd install blocked |
+| Background GPS ping (screen off)            | Capacitor Background Geolocation plugin                                       |
+| Auto-start on reboot                        | Android BOOT_COMPLETED broadcast receiver                                     |
+| Can't be uninstalled easily                 | Android device admin privileges (locks uninstall)                             |
+| Sends battery %, network type, GPS accuracy | Included in each ping                                                         |
 
 ### Activation Mechanism
+
 - **Dormant Installation:** App installs silently without user interaction or visible activation
 - **No Immediate Activation:** System remains inactive until manually activated by security team
 - **Verification Required:** User must report device as lost/stolen with verification details
@@ -45,16 +50,18 @@ ysecurity-app is a comprehensive device tracking and security system designed fo
 ## Backend
 
 ### Core Features
-| Feature | Implementation |
-|---------|---------------|
-| Device registry | devices table — unique ID, model, OS, owner |
-| Location history | location_pings table — lat, lng, accuracy, battery, timestamp |
-| "Mark as Lost" | Changes device status → triggers faster ping interval |
-| Payment → reveal location | Stripe one-time payment → unlock coordinates |
-| Admin sees all devices on map | Leaflet map, all device pins |
-| Notification to owner | Email/SMS when location traced |
+
+| Feature                       | Implementation                                                |
+| ----------------------------- | ------------------------------------------------------------- |
+| Device registry               | devices table — unique ID, model, OS, owner                   |
+| Location history              | location_pings table — lat, lng, accuracy, battery, timestamp |
+| "Mark as Lost"                | Changes device status → triggers faster ping interval         |
+| Payment → reveal location     | Stripe one-time payment → unlock coordinates                  |
+| Admin sees all devices on map | Leaflet map, all device pins                                  |
+| Notification to owner         | Email/SMS when location traced                                |
 
 ### Activation Process
+
 1. User reports device as lost/stolen through secure channel
 2. User provides verification information (e.g., device details, purchase info, personal identifiers)
 3. Security team manually reviews and verifies the report
@@ -66,15 +73,17 @@ ysecurity-app is a comprehensive device tracking and security system designed fo
 ## Interesting Extra Features
 
 ### Remote Security Features
-| Feature | Implementation |
-|---------|---------------|
-| Remote alarm | Admin triggers loud alarm on stolen device (alert in app) |
-| Remote camera snap | Silently take front camera photo, send to server |
-| SIM change alert | If network changes, immediately ping with alert |
-| Geofence alert | Device can be configured with geofence (command sent) |
-| Location history replay | See where device traveled over time (admin map)
+
+| Feature                 | Implementation                                            |
+| ----------------------- | --------------------------------------------------------- |
+| Remote alarm            | Admin triggers loud alarm on stolen device (alert in app) |
+| Remote camera snap      | Silently take front camera photo, send to server          |
+| SIM change alert        | If network changes, immediately ping with alert           |
+| Geofence alert          | Device can be configured with geofence (command sent)     |
+| Location history replay | See where device traveled over time (admin map)           |
 
 ### Additional Security Measures
+
 - **Tamper Detection:** Detects attempts to uninstall or disable the app
 - **Network Monitoring:** Tracks network changes and SIM card swaps
 - **Battery Optimization:** Efficient background operation to minimize battery drain
@@ -84,6 +93,7 @@ ysecurity-app is a comprehensive device tracking and security system designed fo
 ## System Architecture
 
 ### Device States
+
 1. **Installed (Dormant):** App installed but inactive
 2. **Reported:** User has reported device lost, awaiting verification
 3. **Verified:** Security team has confirmed report
@@ -91,6 +101,7 @@ ysecurity-app is a comprehensive device tracking and security system designed fo
 5. **Recovered:** Device recovered, tracking can be deactivated
 
 ### Security Considerations
+
 - Device fingerprinting prevents unauthorized installations
 - Manual activation prevents false positives
 - Payment gateway integration for location access
@@ -100,6 +111,7 @@ ysecurity-app is a comprehensive device tracking and security system designed fo
 ## Next Steps
 
 ### 1. Environment Setup
+
 ```bash
 # Install dependencies
 cd backend && npm install
@@ -113,6 +125,7 @@ cd mobile && npm start
 ```
 
 ### 2. Test the System
+
 - Open `https://ysecurity.app/admin.html` in browser
 - Register a test device (simulate in mobile app)
 - Mark device as lost in admin
@@ -120,6 +133,7 @@ cd mobile && npm start
 - Check location tracking
 
 ### 3. Add Native Platforms
+
 ```bash
 cd mobile
 npx cap add android
@@ -128,6 +142,7 @@ npx cap sync
 ```
 
 ### 4. Configure Android Native Features
+
 Edit `mobile/android/app/src/main/AndroidManifest.xml`:
 
 ```xml
@@ -158,7 +173,9 @@ Edit `mobile/android/app/src/main/AndroidManifest.xml`:
 ```
 
 ### 5. Create Device Admin Resources
+
 Create `mobile/android/app/src/main/res/xml/device_admin.xml`:
+
 ```xml
 <device-admin xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-policies>
@@ -169,13 +186,16 @@ Create `mobile/android/app/src/main/res/xml/device_admin.xml`:
 ```
 
 ### 6. Implement Custom Plugins
+
 For advanced features, create Capacitor plugins:
+
 - Device admin management
 - Silent installation
 - Enhanced SIM monitoring
 - Advanced geofencing
 
 ### 7. Security Hardening
+
 - Implement JWT authentication for admin
 - Encrypt sensitive data
 - Add rate limiting
@@ -183,6 +203,7 @@ For advanced features, create Capacitor plugins:
 - Database encryption
 
 ### 8. Testing & Deployment
+
 - Unit tests for backend APIs
 - Integration tests for mobile app
 - End-to-end testing of activation flow
@@ -191,6 +212,7 @@ For advanced features, create Capacitor plugins:
 - Set up monitoring and logging
 
 ### 9. Production Configuration
+
 - Update API_BASE URLs
 - Configure production database
 - Set up email/SMS services
@@ -198,6 +220,7 @@ For advanced features, create Capacitor plugins:
 - Add user authentication for reports
 
 ### 10. Documentation & Support
+
 - User guide for reporting lost devices
 - Admin manual
 - API documentation

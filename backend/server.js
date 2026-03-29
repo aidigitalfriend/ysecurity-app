@@ -33,9 +33,7 @@ app.set("trust proxy", 1);
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin:
-      process.env.CORS_ORIGIN ||
-      "https://ysecurity.app",
+    origin: process.env.CORS_ORIGIN || "https://ysecurity.app",
     methods: ["GET", "POST"],
     credentials: true,
   },
@@ -166,9 +164,7 @@ app.use(
 // Middleware
 app.use(
   cors({
-    origin:
-      process.env.CORS_ORIGIN ||
-      "https://ysecurity.app",
+    origin: process.env.CORS_ORIGIN || "https://ysecurity.app",
     credentials: true,
   }),
 );
