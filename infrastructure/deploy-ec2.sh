@@ -202,7 +202,7 @@ echo "Setting up basic monitoring..."
 sudo tee /var/www/ysecurity-app/monitor.sh > /dev/null <<EOF
 #!/bin/bash
 # Basic health check script
-if curl -f http://localhost:3000/api/health > /dev/null 2>&1; then
+if curl -f http://localhost:4000/api/health > /dev/null 2>&1; then
     echo "Application is healthy"
 else
     echo "Application is unhealthy"

