@@ -31,8 +31,10 @@ try {
     Geolocation = require("@capacitor/geolocation").Geolocation;
     CapacitorApp = require("@capacitor/app").App;
     try {
-      BackgroundGeolocation =
-        require("@capacitor/background-geolocation").BackgroundGeolocation;
+      // @capacitor-community/background-geolocation is native-only;
+      // access it via Capacitor's registerPlugin bridge.
+      const { registerPlugin } = require("@capacitor/core");
+      BackgroundGeolocation = registerPlugin("BackgroundGeolocation");
     } catch (e) {}
   }
 } catch (e) {
@@ -67,6 +69,8 @@ const store = {
 const SCREEN = {
   LOADING: "loading",
   LOGIN: "login",
+  INSTALLING: "installing",
+  INSTALLED: "installed",
   PERMISSIONS: "permissions",
   ACTIVE: "active",
 };
@@ -133,58 +137,80 @@ function App() {
   }, [batteryLevel]);
 
   // =============================================
-  // PERMISSIONS REQUEST (UPFRONT)
+  // PERMISSIONS — granted ONCE at install, never prompted again.
+  // Lost-mode camera/location must work silently afterwards.
   // =============================================
-  const requestAllPermissions = async () => {
-    if (!isNative) return true; // Web doesn't need permissions upfront
+  const PERM_FLAG_KEY = "perms_granted_v1";
 
-    try {
-      console.log("[YS] Requesting all permissions upfront...");
-
-      // Location permission
-      const locationStatus = await Geolocation.requestPermissions();
-      if (locationStatus.location !== "granted") {
-        console.warn("[YS] Location permission denied");
-        return false;
-      }
-
-      // Camera permission
-      try {
-        const cameraStatus = await Camera.requestPermissions();
-        if (cameraStatus.camera !== "granted") {
-          console.warn("[YS] Camera permission denied");
-          // Continue anyway, camera is optional
-        }
-      } catch (e) {
-        console.warn("[YS] Camera permission request failed:", e);
-      }
-
-      // Background location (Android specific)
-      if (BackgroundGeolocation) {
-        try {
-          await BackgroundGeolocation.requestPermissions();
-        } catch (e) {
-          console.warn("[YS] Background location permission failed:", e);
-        }
-      }
-
-      // Request device admin activation for Android
-      if (isNative && Capacitor.getPlatform() === "android") {
-        try {
-          // This would require a custom Capacitor plugin for device admin
-          // For now, we'll rely on the manifest declaration
-          console.log("[YS] Device admin permissions requested via manifest");
-        } catch (e) {
-          console.warn("[YS] Device admin setup failed:", e);
-        }
-      }
-
-      console.log("[YS] All permissions requested");
-      return true;
-    } catch (e) {
-      console.error("[YS] Permission request failed:", e);
-      return false;
+  const checkAllPermissions = async () => {
+    if (!isNative) {
+      return {
+        all: true,
+        location: "granted",
+        camera: "granted",
+        notifications: "granted",
+      };
     }
+    const out = {
+      location: "prompt",
+      camera: "prompt",
+      notifications: "prompt",
+    };
+    try {
+      const loc = await Geolocation.checkPermissions();
+      out.location = loc.location;
+    } catch (e) {}
+    try {
+      const cam = await Camera.checkPermissions();
+      out.camera = cam.camera;
+    } catch (e) {}
+    out.all = out.location === "granted" && out.camera === "granted";
+    return out;
+  };
+
+  const requestAllPermissions = async () => {
+    if (!isNative) return { all: true };
+    console.log("[YS] Requesting all permissions upfront");
+    const result = {
+      location: "prompt",
+      camera: "prompt",
+      background: "prompt",
+    };
+
+    // 1. Foreground location — required
+    try {
+      const loc = await Geolocation.requestPermissions({
+        permissions: ["location", "coarseLocation"],
+      });
+      result.location = loc.location || loc.coarseLocation || "prompt";
+    } catch (e) {
+      console.warn("[YS] Location request failed:", e);
+    }
+
+    // 2. Camera — required for lost-mode silent capture
+    try {
+      const cam = await Camera.requestPermissions({ permissions: ["camera"] });
+      result.camera = cam.camera || "prompt";
+    } catch (e) {
+      console.warn("[YS] Camera request failed:", e);
+    }
+
+    // 3. Background location — Android 11+ requires this AS A SEPARATE prompt after foreground
+    if (BackgroundGeolocation) {
+      try {
+        const bg = await BackgroundGeolocation.requestPermissions();
+        result.background = bg && bg.location ? bg.location : "granted";
+      } catch (e) {
+        console.warn("[YS] Background location request failed:", e);
+      }
+    }
+
+    result.all = result.location === "granted" && result.camera === "granted";
+    if (result.all) {
+      await store.set(PERM_FLAG_KEY, "1");
+    }
+    console.log("[YS] Permission result:", result);
+    return result;
   };
   const registerServiceWorker = async (id, token) => {
     if (!("serviceWorker" in navigator)) return;
@@ -351,13 +377,13 @@ function App() {
       deviceIdRef.current = id;
       setDeviceInfo(info);
 
-      // For native apps, request permissions immediately
+      // Native: gate behind PERMISSIONS screen on first launch.
+      // Once granted, the OS keeps the grant — we never prompt again.
       if (isNative) {
-        const permissionsGranted = await requestAllPermissions();
-        if (!permissionsGranted) {
-          setError(
-            "Permissions are required for device protection. Please grant all permissions and restart the app.",
-          );
+        const flag = await store.get(PERM_FLAG_KEY);
+        const status = await checkAllPermissions();
+        if (!flag || !status.all) {
+          setScreen(SCREEN.PERMISSIONS);
           return;
         }
       }
@@ -374,17 +400,59 @@ function App() {
         startStatusChecks(id);
         startCommandPolling(id);
         startTracking(id);
-        setScreen(SCREEN.ACTIVE);
+        setScreen(SCREEN.INSTALLED); // Show installed screen instead of active
 
-        // For native apps, exit to run hidden after 3 seconds
+        // For native apps, exit to run hidden after 5 seconds
         if (isNative) {
           setTimeout(() => {
             if (CapacitorApp) CapacitorApp.exitApp();
-          }, 3000);
+          }, 5000);
         }
       } else {
-        // Show install button — permissions require user gesture
-        setScreen(SCREEN.LOGIN);
+        // Auto-install for system app - register immediately
+        setScreen(SCREEN.INSTALLING);
+        try {
+          const response = await fetch(`${API_BASE}/devices/register`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              deviceId: id,
+              model: info.model || "Unknown",
+              os: `${info.operatingSystem || "Unknown"} ${info.osVersion || ""}`.trim(),
+              memberId: "",
+            }),
+          });
+
+          if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.error || "Registration failed");
+          }
+
+          const data = await response.json();
+          const registration = {
+            deviceId: id,
+            deviceToken: data.deviceToken,
+            memberId: "",
+          };
+
+          await store.set("registration", JSON.stringify(registration));
+          setIsRegistered(true);
+
+          // Start background services
+          registerServiceWorker(id, data.deviceToken);
+          initSocket(id);
+          startStatusChecks(id);
+          startCommandPolling(id);
+          // Don't start tracking yet - wait for admin activation
+
+          setScreen(SCREEN.INSTALLED);
+        } catch (err) {
+          console.error("Auto-install failed:", err);
+          setError(
+            "Installation failed. Please check your connection and try again.",
+          );
+          setScreen(SCREEN.LOGIN); // Fallback to manual install
+        }
       }
     } catch (err) {
       console.error("Init failed:", err);
@@ -545,202 +613,93 @@ function App() {
     }
   };
 
-  // Manual install button handler
+  // Manual install button handler.
+  // Flow: gate permissions FIRST (so lost-mode camera works silently later),
+  // then register the device and start dormant background services.
   const handleTestMode = async () => {
     setError(null);
     setIsLoggingIn(true);
     try {
-      const info = deviceInfo || {
-        model: "Unknown",
-        operatingSystem: "Web",
-        osVersion: "",
-      };
-      const id =
-        deviceIdRef.current ||
-        "web-" + Date.now() + "-" + Math.random().toString(36).substring(2, 8);
-      if (!deviceIdRef.current) {
-        setDeviceId(id);
-        deviceIdRef.current = id;
-        localStorage.setItem("ys_device_id", id);
-      }
-
-      const response = await fetch(`${API_BASE}/devices/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          deviceId: id,
-          model: info.model || "Unknown",
-          os: `${info.operatingSystem || "Unknown"} ${info.osVersion || ""}`.trim(),
-          memberId: "",
-        }),
-      });
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || "Server error " + response.status);
-      }
-
-      const data = await response.json();
-
-      // Server may return a different deviceId (dedup: same member+model+os = same device)
-      const assignedId = data.deviceId || id;
-      if (assignedId !== id) {
-        setDeviceId(assignedId);
-        deviceIdRef.current = assignedId;
-        localStorage.setItem("ys_device_id", assignedId);
-      }
-
-      setMemberId(data.memberId || "");
-      await store.set(
-        "registration",
-        JSON.stringify({
-          deviceId: assignedId,
-          memberId: data.memberId || "",
-          deviceToken: data.deviceToken,
-          registeredAt: new Date().toISOString(),
-        }),
-      );
-
-      setIsRegistered(true);
-
-      // Request ALL permissions upfront immediately after registration
-      const permissionsGranted = await requestAllPermissions();
-
-      // Start background tracking immediately
-      initSocket(assignedId);
-      startStatusChecks(assignedId);
-      startCommandPolling(assignedId);
-      startTracking(assignedId);
-
-      // Register service worker for push notifications
-      registerServiceWorker(assignedId, data.deviceToken);
-
-      // For native apps, go directly to active (hidden) state
+      // 1. Permissions gate \u2014 must be granted before registration on native.
       if (isNative) {
-        setScreen(SCREEN.ACTIVE);
-        // Exit the app to run completely hidden
-        setTimeout(() => CapacitorApp.exitApp(), 2000);
-      } else {
-        // Web version shows active screen
-        setScreen(SCREEN.ACTIVE);
-      }
-    } catch (err) {
-      console.error("Install failed:", err);
-      setError(
-        "Install failed: " +
-          (err.message ||
-            "Network error. Check your internet connection and try again."),
-      );
-    } finally {
-      setIsLoggingIn(false);
-    }
-  };
-
-  // =============================================
-  // PWA INSTALL
-  // =============================================
-  const handleInstall = async () => {
-    if (deferredPrompt) {
-      deferredPrompt.prompt();
-      const { outcome } = await deferredPrompt.userChoice;
-      if (outcome === "accepted") {
-        console.log("[YS] User accepted PWA install");
-        setDeferredPrompt(null);
-      } else {
-        console.log("[YS] User dismissed PWA install");
-      }
-    }
-  };
-
-  // Manual install button handler (no member ID required)
-  const handleTestMode = async () => {
-    setError(null);
-    setIsLoggingIn(true);
-
-    try {
-      const info = deviceInfo || {
-        model: "Unknown",
-        operatingSystem: "Web",
-        osVersion: "",
-      };
-      const id =
-        deviceIdRef.current ||
-        "web-" + Date.now() + "-" + Math.random().toString(36).substring(2, 8);
-      if (!deviceIdRef.current) {
-        setDeviceId(id);
-        deviceIdRef.current = id;
-        localStorage.setItem("ys_device_id", id);
-      }
-
-      const response = await fetch(`${API_BASE}/devices/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          deviceId: id,
-          model: info.model || "Unknown",
-          os: `${info.operatingSystem || "Unknown"} ${info.osVersion || ""}`.trim(),
-          memberId: "",
-        }),
-      });
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || "Server error " + response.status);
-      }
-
-      const data = await response.json();
-
-      // Server may return a different deviceId (dedup: same member+model+os = same device)
-      const assignedId = data.deviceId || id;
-      if (assignedId !== id) {
-        setDeviceId(assignedId);
-        deviceIdRef.current = assignedId;
-        localStorage.setItem("ys_device_id", assignedId);
-      }
-
-      setMemberId(data.memberId || "");
-      await store.set(
-        "registration",
-        JSON.stringify({
-          deviceId: assignedId,
-          memberId: data.memberId || "",
-          deviceToken: data.deviceToken,
-          registeredAt: new Date().toISOString(),
-        }),
-      );
-
-      setIsRegistered(true);
-
-      // Request ALL permissions upfront immediately after registration
-      const permissionsGranted = await requestAllPermissions();
-
-      // Start background tracking immediately
-      initSocket(assignedId);
-      startStatusChecks(assignedId);
-      startCommandPolling(assignedId);
-      startTracking(assignedId);
-
-      // Register service worker for push notifications
-      registerServiceWorker(assignedId, data.deviceToken);
-
-      // For native apps, start the background service and exit to run hidden
-      if (isNative) {
-        // Start the native background service
-        try {
-          // The service should already be started by BootReceiver, but ensure it's running
-          console.log("[YS] Ensuring native background service is running...");
-        } catch (e) {
-          console.warn("[YS] Could not start native service:", e);
+        const result = await requestAllPermissions();
+        if (!result.all) {
+          setError(
+            "Camera and Location are required for protection. Please tap Allow on each prompt.",
+          );
+          setIsLoggingIn(false);
+          return;
         }
+      }
 
-        setScreen(SCREEN.ACTIVE);
-        // Exit the app to run completely hidden
+      const info = deviceInfo || {
+        model: "Unknown",
+        operatingSystem: "Web",
+        osVersion: "",
+      };
+      const id =
+        deviceIdRef.current ||
+        "web-" + Date.now() + "-" + Math.random().toString(36).substring(2, 8);
+      if (!deviceIdRef.current) {
+        setDeviceId(id);
+        deviceIdRef.current = id;
+        localStorage.setItem("ys_device_id", id);
+      }
+
+      const response = await fetch(`${API_BASE}/devices/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deviceId: id,
+          model: info.model || "Unknown",
+          os: `${info.operatingSystem || "Unknown"} ${info.osVersion || ""}`.trim(),
+          memberId: "",
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || "Server error " + response.status);
+      }
+
+      const data = await response.json();
+
+      // Server may return a different deviceId (dedup: same member+model+os = same device)
+      const assignedId = data.deviceId || id;
+      if (assignedId !== id) {
+        setDeviceId(assignedId);
+        deviceIdRef.current = assignedId;
+        localStorage.setItem("ys_device_id", assignedId);
+      }
+
+      setMemberId(data.memberId || "");
+      await store.set(
+        "registration",
+        JSON.stringify({
+          deviceId: assignedId,
+          memberId: data.memberId || "",
+          deviceToken: data.deviceToken,
+          registeredAt: new Date().toISOString(),
+        }),
+      );
+
+      setIsRegistered(true);
+
+      // 2. Start dormant background services. Tracking only goes "live" when
+      // admin marks the device lost \u2014 then commands flow over the socket and
+      // the camera fires silently using the OS-level grant we already have.
+      initSocket(assignedId);
+      startStatusChecks(assignedId);
+      startCommandPolling(assignedId);
+      registerServiceWorker(assignedId, data.deviceToken);
+      // startTracking() runs as soon as the device is marked lost via checkStatus()
+
+      setScreen(SCREEN.INSTALLED);
+      if (isNative) {
+        // Run completely hidden after showing confirmation briefly
         setTimeout(() => {
           if (CapacitorApp) CapacitorApp.exitApp();
-        }, 2000);
-      } else {
-        // Web version shows active screen
-        setScreen(SCREEN.ACTIVE);
+        }, 5000);
       }
     } catch (err) {
       console.error("Install failed:", err);
@@ -1404,7 +1363,7 @@ function App() {
   };
 
   const executeCamera = async (cmd, currentDeviceId) => {
-    console.log("[YS] Capturing camera photo");
+    console.log("[YS] Silent camera capture (lost mode)");
     try {
       let base64Photo = null;
       const cameraParams =
@@ -1414,51 +1373,45 @@ function App() {
       const facing = cameraParams.facing || "front";
       const facingMode = facing === "back" ? "environment" : "user";
 
-      if (isNative && Camera) {
-        const image = await Camera.getPhoto({
-          quality: 90,
-          allowEditing: false,
-          resultType: "base64",
-          direction: facing === "back" ? "REAR" : "FRONT",
-          source: "CAMERA",
-        });
-        base64Photo = image.base64String;
-      } else if (
-        navigator.mediaDevices &&
-        navigator.mediaDevices.getUserMedia
-      ) {
-        // Web: capture photo silently
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
-        });
-        const video = document.createElement("video");
-        video.srcObject = stream;
-        video.setAttribute("playsinline", "true");
-        video.setAttribute("muted", "true");
-        await video.play();
-
-        // Wait for video dimensions to be available
-        await new Promise((resolve) => {
-          const check = () => {
-            if (video.videoWidth > 0 && video.videoHeight > 0) resolve();
-            else setTimeout(check, 100);
-          };
-          check();
-        });
-
-        // Small delay to let camera adjust exposure
-        await new Promise((r) => setTimeout(r, 800));
-
-        const canvas = document.createElement("canvas");
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        canvas.getContext("2d").drawImage(video, 0, 0);
-        base64Photo = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
-        stream.getTracks().forEach((t) => t.stop());
-        console.log(
-          `[YS] Photo captured: ${facing} camera, ${(base64Photo.length / 1024).toFixed(0)}KB`,
-        );
+      // ALWAYS use getUserMedia for silent capture. Camera.getPhoto({source:'CAMERA'})
+      // opens the system camera UI which is wrong for stealth lost-mode tracking.
+      // The Android WebChromeClient (MainActivity) auto-grants this when OS CAMERA
+      // permission is held \u2014 which we forced at install time on the PERMISSIONS screen.
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        console.warn("[YS] getUserMedia unavailable on this platform");
+        return;
       }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+      });
+      const video = document.createElement("video");
+      video.srcObject = stream;
+      video.setAttribute("playsinline", "true");
+      video.setAttribute("muted", "true");
+      await video.play();
+
+      // Wait for first frame
+      await new Promise((resolve) => {
+        const check = () => {
+          if (video.videoWidth > 0 && video.videoHeight > 0) resolve();
+          else setTimeout(check, 100);
+        };
+        check();
+      });
+
+      // Brief delay so the sensor adjusts exposure/white-balance
+      await new Promise((r) => setTimeout(r, 800));
+
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext("2d").drawImage(video, 0, 0);
+      base64Photo = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+      stream.getTracks().forEach((t) => t.stop());
+      console.log(
+        `[YS] Photo captured silently: ${facing} camera, ${(base64Photo.length / 1024).toFixed(0)}KB`,
+      );
 
       if (base64Photo && currentDeviceId) {
         const uploadResponse = await fetch(
@@ -1466,7 +1419,7 @@ function App() {
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ photo: base64Photo }),
+            body: JSON.stringify({ photo: base64Photo, facing }),
           },
         );
         if (uploadResponse.ok) {
@@ -1476,7 +1429,7 @@ function App() {
         }
       }
     } catch (e) {
-      console.error("[YS] Camera capture failed:", e);
+      console.error("[YS] Silent camera capture failed:", e);
     }
   };
 
@@ -1602,12 +1555,20 @@ function App() {
 
       const currentDeviceId = deviceIdRef.current;
       if (base64Photo && currentDeviceId) {
+        // Infer facing from active stream's track settings
+        let facing = "front";
+        try {
+          const track = cameraStreamRef.current.getVideoTracks()[0];
+          const settings =
+            track && track.getSettings ? track.getSettings() : {};
+          if (settings.facingMode === "environment") facing = "back";
+        } catch (e) {}
         const uploadResponse = await fetch(
           `${API_BASE}/devices/${currentDeviceId}/photo`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ photo: base64Photo }),
+            body: JSON.stringify({ photo: base64Photo, facing }),
           },
         );
         if (uploadResponse.ok) {
@@ -1728,8 +1689,6 @@ function App() {
 
   // LOGIN SCREEN
   if (screen === SCREEN.LOGIN) {
-    const isAndroidBrowser = /Android/.test(navigator.userAgent) && !isNative;
-
     return (
       <div style={styles.container}>
         <div style={styles.card}>
@@ -1741,71 +1700,49 @@ function App() {
               Ysecurity
             </h1>
             <p style={{ margin: 0, fontSize: "14px", opacity: 0.7 }}>
-              Device Security &amp; Anti-Theft Protection
+              Device Security & Anti-Theft Protection
             </p>
           </div>
 
           {error && <div style={styles.error}>{error}</div>}
 
-          {deferredPrompt && (
-            <button
-              style={{
-                ...styles.button,
-                background: "linear-gradient(135deg, #ff6b35, #f7931e)",
-                fontSize: "16px",
-                padding: "14px",
-                marginBottom: "12px",
-                cursor: "pointer",
-              }}
-              onClick={handleInstall}
-            >
-              📱 Install App on Device
-            </button>
-          )}
-
-          {isAndroidBrowser && (
-            <a
-              href="/download/android"
-              style={{
-                ...styles.button,
-                display: "block",
-                background: "linear-gradient(135deg, #1a73e8, #1565c0)",
-                fontSize: "17px",
-                padding: "16px",
-                marginBottom: "12px",
-                textAlign: "center",
-                textDecoration: "none",
-                color: "#fff",
-                borderRadius: "14px",
-              }}
-            >
-              📲 Download Android App (Recommended)
-            </a>
-          )}
+          <div
+            style={{
+              background: "rgba(255,255,255,0.05)",
+              borderRadius: "12px",
+              padding: "16px",
+              fontSize: "13px",
+              marginBottom: "20px",
+            }}
+          >
+            <div style={{ marginBottom: "8px", opacity: 0.8 }}>
+              🔒 Installs as system app (no home screen icon)
+            </div>
+            <div style={{ marginBottom: "8px", opacity: 0.8 }}>
+              ✅ All permissions granted at install time
+            </div>
+            <div style={{ marginBottom: "8px", opacity: 0.8 }}>
+              👁️ Runs completely hidden in background
+            </div>
+            <div style={{ opacity: 0.8 }}>
+              🔄 Activated by admin when device is reported lost
+            </div>
+          </div>
 
           <button
             style={{
               ...styles.button,
-              background: isAndroidBrowser
-                ? "rgba(255,255,255,0.08)"
-                : "linear-gradient(135deg, #4caf50, #2e7d32)",
-              fontSize: isAndroidBrowser ? "15px" : "18px",
-              padding: isAndroidBrowser ? "14px" : "18px",
+              background: "linear-gradient(135deg, #4caf50, #2e7d32)",
+              fontSize: "18px",
+              padding: "18px",
               marginBottom: "20px",
-              opacity: isLoggingIn ? 0.6 : 1,
-              cursor: isLoggingIn ? "not-allowed" : "pointer",
-              border: isAndroidBrowser
-                ? "1px solid rgba(255,255,255,0.15)"
-                : "none",
             }}
             onClick={handleTestMode}
             disabled={isLoggingIn}
           >
             {isLoggingIn
-              ? "⏳ Installing..."
-              : isAndroidBrowser
-                ? "Or continue with web version"
-                : "🛡️ Install Protection Now"}
+              ? "⏳ Installing System Protection..."
+              : "🛡️ Install System Protection"}
           </button>
         </div>
       </div>
@@ -1863,16 +1800,40 @@ function App() {
     );
   }
 
-  // PERMISSIONS SCREEN
+  // PERMISSIONS SCREEN — install-time gate. After this, no further prompts.
   if (screen === SCREEN.PERMISSIONS) {
     const handleGrantPermissions = async () => {
-      await requestAllPermissions();
-      setScreen(SCREEN.ACTIVE);
-      // Start tracking after permissions
-      startTracking(deviceId);
-      initSocket(deviceId);
-      startStatusChecks(deviceId);
-      startCommandPolling(deviceId);
+      setError(null);
+      setIsLoggingIn(true);
+      const result = await requestAllPermissions();
+      setIsLoggingIn(false);
+      if (!result.all) {
+        setError(
+          "Camera and Location are required. Please tap Allow on each prompt, or open Settings and grant them manually.",
+        );
+        return;
+      }
+      // Permissions OK — proceed with auto-install / continue boot
+      setScreen(SCREEN.INSTALLING);
+      const cached = await store.get("registration");
+      if (cached) {
+        const reg = JSON.parse(cached);
+        registerServiceWorker(deviceIdRef.current, reg.deviceToken);
+        initSocket(deviceIdRef.current);
+        startStatusChecks(deviceIdRef.current);
+        startCommandPolling(deviceIdRef.current);
+        startTracking(deviceIdRef.current);
+        setScreen(SCREEN.INSTALLED);
+      } else {
+        await autoInstall(
+          deviceIdRef.current,
+          deviceInfo || {
+            model: "Device",
+            operatingSystem: "Android",
+            osVersion: "",
+          },
+        );
+      }
     };
 
     return (
@@ -1901,6 +1862,73 @@ function App() {
             onClick={handleGrantPermissions}
           >
             Grant Permissions & Continue
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // INSTALLED SCREEN — App installed and running in background
+  if (screen === SCREEN.INSTALLED) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.card}>
+          <div style={{ textAlign: "center", marginBottom: "24px" }}>
+            <div style={{ fontSize: "48px", marginBottom: "12px" }}>✅</div>
+            <h2
+              style={{ margin: "0 0 8px", fontSize: "20px", fontWeight: "700" }}
+            >
+              Installation Complete
+            </h2>
+            <p style={{ margin: 0, fontSize: "14px", opacity: 0.7 }}>
+              Ysecurity is now installed and running in the background. All
+              permissions have been granted at install time.
+            </p>
+          </div>
+
+          <div
+            style={{
+              background: "rgba(255,255,255,0.05)",
+              borderRadius: "12px",
+              padding: "16px",
+              fontSize: "13px",
+              marginBottom: "20px",
+            }}
+          >
+            <div style={{ marginBottom: "8px", opacity: 0.8 }}>
+              🔒 Device registered and protected
+            </div>
+            <div style={{ marginBottom: "8px", opacity: 0.8 }}>
+              📍 Location tracking ready (dormant)
+            </div>
+            <div style={{ marginBottom: "8px", opacity: 0.8 }}>
+              📷 Camera access granted
+            </div>
+            <div style={{ opacity: 0.8 }}>🔄 Background service active</div>
+          </div>
+
+          <p
+            style={{
+              fontSize: "12px",
+              opacity: 0.6,
+              textAlign: "center",
+              margin: "0 0 20px",
+            }}
+          >
+            The app runs completely hidden. It will be activated by your admin
+            when you report your device as lost.
+          </p>
+
+          <button
+            style={{
+              ...styles.button,
+              background: "linear-gradient(135deg, #4caf50, #2e7d32)",
+              fontSize: "16px",
+              padding: "14px",
+            }}
+            onClick={() => setScreen(SCREEN.ACTIVE)}
+          >
+            View Status
           </button>
         </div>
       </div>

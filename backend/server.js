@@ -548,6 +548,9 @@ async function initializeDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await pool.query(
+      "CREATE INDEX IF NOT EXISTS idx_device_photos_device_id ON device_photos(device_id, created_at DESC)",
+    );
 
     // Create device_activity table - logs all device events
     await pool.query(`
@@ -1872,7 +1875,7 @@ app.post(
   ],
   async (req, res) => {
     const { deviceId } = req.params;
-    const { photo } = req.body;
+    const { photo, facing } = req.body;
 
     try {
       // Save photo to device's pictures folder
@@ -1886,16 +1889,22 @@ app.post(
       // Save to database
       const safeId = deviceId.replace(/[^a-zA-Z0-9_-]/g, "_");
       const relativePath = `uploads/${safeId}/pictures/${filename}`;
+      const source =
+        facing === "back"
+          ? "rear_camera"
+          : facing === "front"
+            ? "front_camera"
+            : "camera";
       await pool.query(
         "INSERT INTO device_photos (device_id, filename, file_path, file_size, source) VALUES ($1, $2, $3, $4, $5)",
-        [deviceId, filename, relativePath, photoBuffer.length, "camera"],
+        [deviceId, filename, relativePath, photoBuffer.length, source],
       );
 
       // Log activity
       await logDeviceActivity(
         deviceId,
         "photo_captured",
-        JSON.stringify({ filename, size: photoBuffer.length }),
+        JSON.stringify({ filename, size: photoBuffer.length, source }),
       );
 
       logger.info(
